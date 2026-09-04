@@ -48,61 +48,130 @@ function rateOK(state,type){
 }
 
 const SERVER_STARTED_AT=new Date().toISOString();
-const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/SmolLM2-135M-Instruct-ONNX-MHA';
+const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/SmolLM2-135M-Instruct-ONNX';
+const AI_DTYPE=process.env.CWN_AI_DTYPE||'q4f16';
 const AI_ENABLED=process.env.CWN_AI_ENABLED!=='0';
+const AI_DEBUG=process.env.CWN_AI_DEBUG==='1';
+const AI_LOAD_TIMEOUT_MS=clamp(Number(process.env.CWN_AI_LOAD_TIMEOUT_MS)||120000,30000,300000);
+const AI_MAX_RSS_MB=clamp(Number(process.env.CWN_AI_MAX_RSS_MB)||330,160,1024);
 let aiState=AI_ENABLED?'STARTING':'DISABLED',aiWorker=null,aiBusy=false,aiReqSeq=0,aiLastError='',aiReadyAt=null;
+let aiWorkerMemoryMB=null,aiWorkerHeapMB=null,aiWorkerStartedAt=null,aiWorkerLoadStartedAt=null,aiLoadProgress=null,aiLoadTimer=null;
 const aiPending=new Map();
-
+const aiQueue=[];
+const aiStats={requests:0,humanRequests:0,botRequests:0,success:0,fallbacks:0,timeouts:0,busyFallbacks:0,workerExits:0,generationMsTotal:0,lastGenerationMs:null,lastRequestAt:null,lastSuccessAt:null};
+const aiTrace=[];
+let aiLastPrompt='',aiLastOutput='',aiLastSource='',aiLastStage='';
+function traceAI(event,data={}){
+ const row={at:new Date().toISOString(),event,...data};
+ aiTrace.push(row);if(aiTrace.length>40)aiTrace.shift();
+ console.log('[AI]',event,JSON.stringify(data));
+}
 function failAIPending(reason='AI unavailable'){
  for(const [rid,p] of aiPending){clearTimeout(p.timer);p.resolve(null)}
- aiPending.clear();aiBusy=false;aiLastError=reason;
+ aiPending.clear();
+ while(aiQueue.length){const q=aiQueue.shift();q.resolve(null)}
+ aiBusy=false;aiLastError=reason;
+}
+function stopAIWorker(reason='AI stopped'){
+ clearTimeout(aiLoadTimer);aiLoadTimer=null;
+ if(aiWorker){
+  try{aiWorker.send({type:'shutdown',reason})}catch{}
+  setTimeout(()=>{try{aiWorker?.kill('SIGTERM')}catch{}},250);
+ }
 }
 function startAIWorker(){
  if(!AI_ENABLED||aiWorker)return;
- aiState='LOADING';
+ aiState='LOADING';aiLastError='';aiReadyAt=null;aiLoadProgress=null;aiWorkerLoadStartedAt=new Date().toISOString();
  try{
   aiWorker=fork(new URL('./ai-worker.js',import.meta.url),[],{
    stdio:['ignore','inherit','inherit','ipc'],
-   env:{...process.env,CWN_AI_MODEL:AI_MODEL}
+   env:{...process.env,CWN_AI_MODEL:AI_MODEL,CWN_AI_DTYPE:AI_DTYPE,CWN_AI_MAX_RSS_MB:String(AI_MAX_RSS_MB)}
   });
+  aiWorkerStartedAt=new Date().toISOString();
+  traceAI('worker-start',{pid:aiWorker.pid,model:AI_MODEL,dtype:AI_DTYPE,maxRssMB:AI_MAX_RSS_MB});
+  aiLoadTimer=setTimeout(()=>{
+   if(!['READY','DISABLED'].includes(aiState)){
+    aiState='FALLBACK';aiLastError=`AI load timeout after ${AI_LOAD_TIMEOUT_MS} ms`;traceAI('load-timeout',{ms:AI_LOAD_TIMEOUT_MS});stopAIWorker(aiLastError);
+   }
+  },AI_LOAD_TIMEOUT_MS);
   aiWorker.on('message',m=>{
    if(!m||typeof m!=='object')return;
    if(m.type==='state'){
     aiState=m.state||aiState;
-    if(m.error)aiLastError=String(m.error).slice(0,160);
-    if(aiState==='READY')aiReadyAt=new Date().toISOString();
+    if(m.error)aiLastError=String(m.error).slice(0,300);
+    if(m.progress)aiLoadProgress=m.progress;
+    if(aiState==='READY'){clearTimeout(aiLoadTimer);aiLoadTimer=null;aiReadyAt=new Date().toISOString();traceAI('ready',{pid:aiWorker?.pid,rssMB:aiWorkerMemoryMB})}
+    else traceAI('state',{state:aiState,error:m.error||null});
+    return;
+   }
+   if(m.type==='progress'){
+    aiLoadProgress={status:m.status||null,file:m.file||null,progress:Number.isFinite(m.progress)?Math.round(m.progress*10)/10:null,loaded:m.loaded||null,total:m.total||null};
+    return;
+   }
+   if(m.type==='memory'){
+    aiWorkerMemoryMB=Number.isFinite(m.rssMB)?m.rssMB:aiWorkerMemoryMB;
+    aiWorkerHeapMB=Number.isFinite(m.heapMB)?m.heapMB:aiWorkerHeapMB;
     return;
    }
    if(m.type==='result'){
     const p=aiPending.get(m.id);if(!p)return;
     clearTimeout(p.timer);aiPending.delete(m.id);aiBusy=false;
-    p.resolve(m.ok?m.text:null);
+    const ms=Date.now()-p.startedAt;aiStats.lastGenerationMs=ms;aiStats.generationMsTotal+=ms;
+    if(m.ok&&m.text){aiStats.success++;aiStats.lastSuccessAt=new Date().toISOString();aiLastOutput=String(m.text).slice(0,500);traceAI('generation-ok',{id:m.id,source:p.source,stage:p.stage,ms,chars:aiLastOutput.length})}
+    else{aiStats.fallbacks++;if(m.error)aiLastError=String(m.error).slice(0,300);traceAI('generation-failed',{id:m.id,source:p.source,stage:p.stage,ms,error:m.error||null})}
+    p.resolve(m.ok?m.text:null);pumpAIQueue();return;
    }
   });
-  aiWorker.on('error',err=>{aiState='FALLBACK';failAIPending(err?.message||'AI worker error')});
+  aiWorker.on('error',err=>{aiState='FALLBACK';failAIPending(err?.message||'AI worker error');traceAI('worker-error',{error:aiLastError})});
   aiWorker.on('exit',(code,signal)=>{
-   aiWorker=null;
-   if(aiState!=='DISABLED'){aiState='FALLBACK';failAIPending(`AI worker exit ${code??''} ${signal??''}`.trim())}
+   clearTimeout(aiLoadTimer);aiLoadTimer=null;aiWorker=null;aiStats.workerExits++;
+   if(aiState!=='DISABLED'&&aiState!=='FALLBACK')aiState='FALLBACK';
+   if(!aiLastError)aiLastError=`AI worker exit ${code??''} ${signal??''}`.trim();
+   failAIPending(aiLastError);traceAI('worker-exit',{code,signal,error:aiLastError});
   });
- }catch(err){
-  aiState='FALLBACK';aiLastError=err?.message||String(err);
- }
+ }catch(err){aiState='FALLBACK';aiLastError=err?.message||String(err);traceAI('start-failed',{error:aiLastError})}
 }
-setTimeout(startAIWorker,8000);
+setTimeout(startAIWorker,5000);
 
-function requestAI(prompt,{timeout=9000}={}){
- if(aiState!=='READY'||!aiWorker||!aiWorker.connected||aiBusy)return Promise.resolve(null);
- aiBusy=true;const rid=++aiReqSeq;
+function pumpAIQueue(){
+ if(aiBusy||aiState!=='READY'||!aiWorker||!aiWorker.connected)return;
+ const q=aiQueue.shift();if(!q)return;
+ aiBusy=true;const rid=++aiReqSeq;q.startedAt=Date.now();
+ const timer=setTimeout(()=>{
+  aiPending.delete(rid);aiBusy=false;aiStats.timeouts++;aiStats.fallbacks++;aiLastError=`AI generation timeout (${q.timeout} ms)`;traceAI('generation-timeout',{id:rid,source:q.source,stage:q.stage,ms:q.timeout});q.resolve(null);pumpAIQueue();
+ },q.timeout);
+ aiPending.set(rid,{...q,timer});
+ try{aiWorker.send({type:'generate',id:rid,prompt:q.prompt,source:q.source,stage:q.stage})}
+ catch(err){clearTimeout(timer);aiPending.delete(rid);aiBusy=false;aiStats.fallbacks++;aiLastError=err?.message||String(err);q.resolve(null);pumpAIQueue()}
+}
+function requestAI(prompt,{timeout=7500,source='human',stage='QSO'}={}){
+ aiStats.requests++;aiStats.lastRequestAt=new Date().toISOString();
+ if(source==='human')aiStats.humanRequests++;else aiStats.botRequests++;
+ aiLastPrompt=String(prompt||'').slice(0,1200);aiLastSource=source;aiLastStage=stage;
+ if(aiState!=='READY'||!aiWorker||!aiWorker.connected){aiStats.fallbacks++;return Promise.resolve(null)}
+ if(source!=='human'&&(aiBusy||aiQueue.length)){aiStats.busyFallbacks++;aiStats.fallbacks++;return Promise.resolve(null)}
  return new Promise(resolve=>{
-  const timer=setTimeout(()=>{
-   aiPending.delete(rid);aiBusy=false;resolve(null);
-  },timeout);
-  aiPending.set(rid,{resolve,timer});
-  try{aiWorker.send({type:'generate',id:rid,prompt})}
-  catch(_){clearTimeout(timer);aiPending.delete(rid);aiBusy=false;resolve(null)}
+  const item={prompt:String(prompt||''),timeout:clamp(Number(timeout)||7500,2500,12000),source,stage,resolve,startedAt:0};
+  if(source==='human'){
+   const firstBot=aiQueue.findIndex(x=>x.source!=='human');
+   if(firstBot>=0)aiQueue.splice(firstBot,0,item);else aiQueue.push(item);
+   while(aiQueue.length>3){const drop=aiQueue.pop();aiStats.busyFallbacks++;aiStats.fallbacks++;drop.resolve(null)}
+  }else aiQueue.push(item);
+  pumpAIQueue();
  });
 }
-
+function aiDebugSnapshot(full=false){
+ const avg=aiStats.success?Math.round(aiStats.generationMsTotal/aiStats.success):null;
+ const base={
+  ok:true,service:'CW Network AI',version:'0.27',state:aiState,enabled:AI_ENABLED,busy:aiBusy,queue:aiQueue.map(x=>({source:x.source,stage:x.stage})),
+  model:AI_MODEL,dtype:AI_DTYPE,readyAt:aiReadyAt,error:aiLastError||null,
+  worker:{pid:aiWorker?.pid||null,startedAt:aiWorkerStartedAt,loadStartedAt:aiWorkerLoadStartedAt,rssMB:aiWorkerMemoryMB,heapMB:aiWorkerHeapMB,maxRssMB:AI_MAX_RSS_MB,loadTimeoutMs:AI_LOAD_TIMEOUT_MS,progress:aiLoadProgress},
+  main:{rssMB:Math.round(process.memoryUsage().rss/1024/1024),heapMB:Math.round(process.memoryUsage().heapUsed/1024/1024),uptime:Math.round(process.uptime())},
+  stats:{...aiStats,avgGenerationMs:avg},last:{source:aiLastSource||null,stage:aiLastStage||null,generationMs:aiStats.lastGenerationMs},trace:aiTrace.slice(-20)
+ };
+ if(full&&AI_DEBUG){base.last.prompt=aiLastPrompt||null;base.last.output=aiLastOutput||null;base.debugContent=true}else base.debugContent=false;
+ return base;
+}
 const personaStyles=[
  {role:'SKCC',wpm:[11,16],keyMode:'STRAIGHT',tone:'friendly slow traditional CW operator'},
  {role:'BUG',wpm:[15,20],keyMode:'BUG',tone:'experienced conversational bug operator'},
@@ -204,14 +273,13 @@ function cleanAIText(raw,bot,other){
  if(!s.includes(bot.callsign))s=`${other.callsign||'STN'} DE ${bot.callsign} ${s}`;
  return s||fallbackReply(bot,other);
 }
-async function aiReply(bot,other,context,stage='QSO'){
- const prompt=`You are ${bot.callsign}, a simulated amateur radio CW operator. Style: ${bot.tone}. Name ${bot.name}. QTH ${bot.qth}. Power ${bot.power} W.
-Reply to ${other.callsign||'STN'} in authentic concise amateur-radio CW abbreviations. One transmission only, max 20 words. Uppercase. No prose, no markdown, no explanation.
-Stage: ${stage}. Recent context: ${context||'none'}.
-Always include both callsigns when practical. End with BK if conversation continues, K if awaiting first reply, or 73 SK if closing.
+async function aiReply(bot,other,context,stage='QSO',source='human'){
+ const prompt=`CALL ${bot.callsign}; NAME ${bot.name}; QTH ${bot.qth}; ${bot.power}W; STYLE ${bot.role}.
+HEARD ${String(context||'').slice(-180)}
+STAGE ${stage}. Reply as realistic CW only, uppercase, <=16 words. No explanation. Use BK/K/73 SK correctly.
 ANSWER:`;
  try{
-  const raw=await requestAI(prompt,{timeout:8500});
+  const raw=await requestAI(prompt,{timeout:7500,source,stage});
   return raw?cleanAIText(raw,bot,other):fallbackReply(bot,other,stage);
  }catch(err){return fallbackReply(bot,other,stage)}
 }
@@ -222,14 +290,14 @@ async function startBotToBot(caller,hunter){
  if(!caller||!hunter||caller.busy||hunter.busy)return;
  hunter.hz=caller.hz;hunter.partnerId=caller.stationId;caller.partnerId=hunter.stationId;
  hunter.state='QSO';caller.state='QSO';broadcast({type:'station_state',...publicState(hunter)});
- const line=await aiReply(hunter,caller,caller.lastText||'', 'CALL');
+ const line=await aiReply(hunter,caller,caller.lastText||'', 'CALL','bot');
  transmitVirtual(hunter,line,{after:()=>setTimeout(async()=>{
   if(!caller.active||!hunter.active)return;
-  const reply=await aiReply(caller,hunter,line,'QSO');
+  const reply=fallbackReply(caller,hunter,'QSO');
   transmitVirtual(caller,reply,{after:()=>setTimeout(async()=>{
-   const third=await aiReply(hunter,caller,reply,'QSO');
+   const third=fallbackReply(hunter,caller,'QSO');
    transmitVirtual(hunter,third,{after:()=>setTimeout(async()=>{
-    const close=await aiReply(caller,hunter,third,'CLOSE');
+    const close=fallbackReply(caller,hunter,'CLOSE');
     transmitVirtual(caller,close,{after:()=>{
      caller.state=hunter.state='LISTEN';caller.partnerId=hunter.partnerId=null;hunter.hz=hunter.homeHz;
      broadcast({type:'station_state',...publicState(hunter)});
@@ -281,7 +349,7 @@ async function scheduleBotReply(user,bot,stage,context,delay=650){
  bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;broadcast({type:'station_state',...publicState(bot)});
  setTimeout(async()=>{
   if(!bot.active||bot.busy)return;
-  const text=await aiReply(bot,user,context,stage);
+  const text=await aiReply(bot,user,context,stage,'human');
   transmitVirtual(bot,text,{after:()=>{
    if(stage==='CLOSE'){
     const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,t:Date.now()});
@@ -336,13 +404,18 @@ const server=http.createServer((req,res)=>{
  if(req.url==='/'||req.url==='/health'){
   res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
   res.end(JSON.stringify({
-   ok:true,service:'CW Network',version:'0.26',
+   ok:true,service:'CW Network',version:'0.27',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
-   ai:aiState,aiBusy,aiReadyAt,aiError:aiLastError||null,model:AI_MODEL,
-   aiPid:aiWorker?.pid||null,startedAt:SERVER_STARTED_AT,
+   ai:aiState,aiBusy,aiQueue:aiQueue.length,aiReadyAt,aiError:aiLastError||null,model:AI_MODEL,aiDtype:AI_DTYPE,
+   aiPid:aiWorker?.pid||null,aiMemoryMB:aiWorkerMemoryMB,aiLoadProgress,startedAt:SERVER_STARTED_AT,
    memoryMB:Math.round(process.memoryUsage().rss/1024/1024),
    uptime:Math.round(process.uptime()),spaceWeather
   }));return;
+ }
+ if(req.url?.startsWith('/ai/debug')){
+  const full=req.url.includes('full=1');
+  res.writeHead(200,{'content-type':'application/json; charset=utf-8','cache-control':'no-store','access-control-allow-origin':'*'});
+  res.end(JSON.stringify(aiDebugSnapshot(full),null,2));return;
  }
  res.writeHead(404);res.end('Not found');
 });
@@ -395,4 +468,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.25 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.27 listening on ${PORT}`));
