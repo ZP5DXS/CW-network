@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>CW Network Radio</title>
+<meta name="cw-ws-url" content="wss://cw-network.onrender.com">
+<style>
+:root{
+  --bg:#0b0e11; --panel:#14191f; --panel2:#0f1419; --line:#2b343d; --text:#e9eef2;
+  --muted:#94a0aa; --accent:#53d18c; --warn:#e2c36b; --danger:#f06b6b; --display:#b8efc7;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+button,input,select{font:inherit}
+body{min-height:100vh}
+.app{max-width:1440px;margin:auto;padding:14px}
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.brand{display:flex;gap:12px;align-items:center}
+.logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(145deg,#1d2b25,#0f1613);display:grid;place-items:center;border:1px solid #284435;font-weight:900;color:var(--accent)}
+.brand h1{font-size:18px;margin:0;letter-spacing:.08em}
+.brand small{color:var(--muted)}
+.links{display:flex;gap:8px;flex-wrap:wrap}
+.links a{color:var(--text);text-decoration:none;border:1px solid var(--line);padding:8px 10px;border-radius:10px;background:var(--panel)}
+.statusbar{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:12px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:9px 11px}
+.stat b{display:block;font-size:13px}.stat span{color:var(--muted);font-size:12px}
+.radio{display:grid;grid-template-columns:minmax(0,2.1fr) minmax(300px,.9fr);gap:12px}
+.main,.side{display:flex;flex-direction:column;gap:12px}
+.card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:16px;padding:12px;box-shadow:0 10px 25px rgba(0,0,0,.18)}
+.display{display:grid;grid-template-columns:1.4fr .8fr;gap:12px;align-items:stretch}
+.freqbox{background:#07100b;border:1px solid #274334;border-radius:14px;padding:14px 16px;position:relative;overflow:hidden}
+.band{color:#7fc792;font-weight:800;letter-spacing:.12em;font-size:12px}
+.freq{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--display);font-size:clamp(38px,7vw,76px);line-height:1;letter-spacing:.025em;margin-top:5px;display:flex;align-items:baseline;flex-wrap:nowrap}
+.freq .digit{cursor:ns-resize;border-radius:5px;padding:0 1px;transition:background .12s,color .12s}
+.freq .digit:hover,.freq .digit.selected{background:rgba(184,239,199,.14);color:#e1ffe8}
+.freq .sep{opacity:.72;pointer-events:none}
+.vfo-tools{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:9px}
+.vfo-tools button{border:1px solid var(--line);background:#11171c;color:var(--text);border-radius:8px;padding:7px 9px;cursor:pointer;font-size:12px}
+.vfo-tools button.active{background:#244f38;color:#b7f3cb;border-color:#39784f}
+.disabledCtl{opacity:.4;pointer-events:none}
+.rotorStatus{font-size:11px;color:var(--warn);margin-top:4px;min-height:15px}
+.subfreq{display:flex;gap:14px;flex-wrap:wrap;color:#77b98b;font-family:ui-monospace,monospace;font-size:12px;margin-top:8px}
+.txflag{position:absolute;right:12px;top:11px;padding:5px 8px;border-radius:8px;font-weight:900;font-size:12px;background:#173323;color:#69db93;border:1px solid #28533a}
+.txflag.tx{background:#351818;color:#ff8a8a;border-color:#663030}
+.meterbox{display:grid;grid-template-rows:auto 1fr auto;gap:8px}
+.smeter{height:36px;background:#0d1115;border-radius:10px;border:1px solid var(--line);overflow:hidden;position:relative}
+.sfill{height:100%;width:18%;background:linear-gradient(90deg,#3d8d63,#a8b94d);transition:width .15s}
+.slabels{display:flex;justify-content:space-between;font-size:10px;color:var(--muted)}
+.smallgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.kpi{border:1px solid var(--line);border-radius:10px;padding:8px;background:#10151a}.kpi small{display:block;color:var(--muted)}.kpi b{font-size:15px}
+.waterfall{height:210px;cursor:crosshair;border-radius:12px;border:1px solid var(--line);background:
+linear-gradient(to bottom,rgba(80,140,95,.18),transparent 18%),
+repeating-linear-gradient(90deg,transparent 0 6.6%,rgba(255,255,255,.035) 6.7% 6.8%),
+linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
+.signal{position:absolute;top:0;bottom:0;width:2px;background:#9ef9b7;opacity:.7;box-shadow:0 0 12px #9ef9b7}
+.signal::after{content:"";position:absolute;left:-8px;top:0;width:18px;height:100%;background:linear-gradient(90deg,transparent,rgba(147,255,178,.12),transparent)}
+.wfscale{display:flex;justify-content:space-between;font-family:ui-monospace,monospace;color:var(--muted);font-size:11px;margin-top:6px}
+.controls{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+.ctrl{border:1px solid var(--line);background:#10151a;border-radius:12px;padding:9px;min-height:72px}
+.ctrl label{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}
+.ctrl button,.ctrl select{width:100%;border:1px solid #35414b;background:#161d23;color:var(--text);border-radius:9px;padding:8px;cursor:pointer}
+.ctrl button.active{background:#1d4d32;color:#aef7c8;border-color:#39784f}
+.ctrl input[type=range]{width:100%}
+.row2{display:grid;grid-template-columns:1.1fr .9fr;gap:12px}
+.dialwrap{display:grid;grid-template-columns:160px 1fr;gap:14px;align-items:center}
+.dial{width:150px;height:150px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#3b444b,#161b20 58%,#090b0d 60%);border:4px solid #252d33;box-shadow:inset 0 0 18px rgba(0,0,0,.7),0 8px 20px rgba(0,0,0,.35);position:relative;cursor:grab;user-select:none;touch-action:none;overscroll-behavior:none}
+.dial.dragging{cursor:grabbing}
+.dial:after{content:"";position:absolute;width:5px;height:50px;background:#d6e7dc;border-radius:4px;left:calc(50% - 2px);top:15px;transform-origin:2px 60px;transform:rotate(var(--rot,0deg))}
+.bandbuttons{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}
+.bandbuttons button{padding:9px 4px;border-radius:9px;border:1px solid var(--line);background:#11171c;color:var(--text)}
+.bandbuttons button.active{background:#244f38;color:#b7f3cb}
+.keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.keybtn{padding:12px 8px;border-radius:10px;border:1px solid var(--line);background:#11171c;color:var(--text)}
+.keybtn.active{background:#3d2b17;color:#ffd49a}
+.keybar{height:78px;border:1px solid var(--line);border-radius:11px;background:#0b1115;display:grid;place-items:center;margin-top:8px;font-weight:800;letter-spacing:.15em;color:#92a0aa;user-select:none;touch-action:none;overscroll-behavior:none}
+.keybar.down{background:#371919;color:#ff9191;border-color:#6c3333}
+.rotor{display:grid;grid-template-columns:140px 1fr;gap:12px;align-items:center}
+.compass{width:130px;height:130px;border-radius:50%;border:2px solid #3a444d;position:relative;background:radial-gradient(circle,#151d22 0 55%,#0d1114 56% 100%)}
+.compass:before,.compass:after{position:absolute;color:var(--muted);font-size:10px}
+.compass:before{content:"N";top:5px;left:61px}.compass:after{content:"S";bottom:5px;left:61px}
+.needle{position:absolute;left:63px;top:17px;width:4px;height:48px;background:#e5c66a;transform-origin:2px 48px;transform:rotate(var(--az,0deg));border-radius:3px}
+.log{height:250px;overflow:auto;font-family:ui-monospace,monospace;font-size:12px;background:#0a0e11;border:1px solid var(--line);border-radius:10px;padding:8px}
+.log div{padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04)}.log time{color:#6f7d88;margin-right:7px}
+.callbox{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.callbox input{width:100%;padding:9px;border:1px solid var(--line);border-radius:9px;background:#0c1115;color:var(--text)}
+.footer{margin-top:12px;text-align:center;color:var(--muted);font-size:12px}
+@media(max-width:980px){.radio{grid-template-columns:1fr}.controls{grid-template-columns:repeat(3,1fr)}.statusbar{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:650px){.display,.row2,.dialwrap,.rotor{grid-template-columns:1fr}.controls{grid-template-columns:repeat(2,1fr)}.dial,.compass{margin:auto}.statusbar{grid-template-columns:1fr 1fr}.callbox{grid-template-columns:1fr}}
+
+.servicebadge{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid #355043;border-radius:8px;background:#102018;color:#9fe5b8;font-size:11px}
+.servicebadge .dot{width:7px;height:7px;border-radius:50%;background:#6fe19b;box-shadow:0 0 8px #6fe19b}
+.minirow{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
+.mini{border:1px solid var(--line);background:#10151a;border-radius:9px;padding:7px 8px;font-size:11px;color:var(--muted)}
+.mini b{color:var(--text);font-size:12px}
+.likeBtn{width:100%;padding:10px;border:1px solid #3b5d49;background:#14241b;color:#b9f2cc;border-radius:10px;cursor:pointer;font-weight:800}
+.likeBtn.active{background:#1d4d32;color:#d7ffe4}
+.statsgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.statmini{border:1px solid var(--line);border-radius:10px;padding:8px;background:#0e1418}
+.statmini small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.06em}
+.statmini b{font-size:15px}
+.bandnpc{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:12px}
+.bandnpc:last-child{border-bottom:0}
+.bandnpc span{color:var(--muted)}
+
+.activityPanel{overflow:hidden;display:grid;grid-template-rows:auto minmax(150px,.72fr) minmax(0,1.28fr);min-height:0}
+.activityHead{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:9px}
+.activityHead small{color:var(--muted);font-size:10px}
+.activitySummary{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.activityCounters{display:flex;gap:8px;flex-wrap:wrap}
+.activityCounters span{border:1px solid var(--line);border-radius:8px;padding:5px 7px;background:#10151a;color:var(--muted);font-size:10px}
+.activityCounters b{color:var(--text)}
+.activityLog{height:auto;min-height:0;overflow:hidden}
+.activityDetails{margin-top:8px;min-height:0;overflow:hidden;display:block}
+.activityDivider{height:1px;background:rgba(255,255,255,.07);margin:2px 0 8px}
+.activityDetails.servicesHidden{visibility:hidden}
+.activityDetails.servicesHidden .activityDivider{visibility:visible;opacity:.25}
+.switchLine{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:10px;cursor:pointer;white-space:nowrap}
+.switchLine input{position:absolute;opacity:0;pointer-events:none}
+.switchUi{width:32px;height:18px;border-radius:999px;background:#263038;border:1px solid #3a4650;position:relative;transition:.18s}
+.switchUi:after{content:"";position:absolute;width:12px;height:12px;border-radius:50%;background:#86939d;left:2px;top:2px;transition:.18s}
+.switchLine input:checked + .switchUi{background:#1f5536;border-color:#39784f}
+.switchLine input:checked + .switchUi:after{left:16px;background:#aef7c8}
+
+.wf-trace{position:absolute;top:0;height:6px;min-width:2px;border-radius:2px;background:#9ef9b7;box-shadow:0 0 8px rgba(158,249,183,.55);opacity:.8;pointer-events:none}
+.wf-trace.bot{opacity:.55}
+.wf-trace.service{background:#e2c36b;box-shadow:0 0 8px rgba(226,195,107,.55);opacity:.8}
+.wf-center{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,.25);left:50%;pointer-events:none}
+
+.wfCanvas{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none}
+
+.wf-tune{position:absolute;top:0;left:50%;width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-top:12px solid #ff4c4c;transform:translateX(-50%);filter:drop-shadow(0 0 4px rgba(255,76,76,.9));z-index:4;pointer-events:none;transition:left .045s linear}
+.wf-tune:after{content:"";position:absolute;left:-1px;top:-1px;width:2px;height:15px;background:#ff4c4c;opacity:.72}
+.footerBrand{min-width:0}
+.footerTitle{font-weight:900;letter-spacing:.08em;color:var(--text);font-size:12px}
+.footerTitle span{color:var(--accent)}
+.footerTag{font-size:10px;color:var(--muted);margin-top:2px}
+.flagMarquee{overflow:hidden;margin-top:6px;border-top:1px solid rgba(255,255,255,.06);padding-top:5px;mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent);-webkit-mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent)}
+.flagTrack{display:flex;width:max-content;gap:10px;animation:flagsMove 28s linear infinite;white-space:nowrap;font-size:17px}
+@keyframes flagsMove{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+@media(prefers-reduced-motion:reduce){.flagTrack{animation:none}}
+
+
+.decodebox{min-height:44px;border:1px solid var(--line);background:#0a0e11;border-radius:9px;padding:8px;font-family:ui-monospace,monospace;font-size:12px;color:#a8eec0;margin-top:8px}
+.decodeStrip{margin-top:8px;border:1px solid var(--line);background:#08100b;border-radius:9px;padding:8px 10px;font-family:ui-monospace,monospace;font-size:12px;color:#a8eec0;min-height:34px}
+.decodeStrip.hidden{display:none}
+.hidden{display:none!important}
+
+.decodeCtrl{grid-column:1/-1;min-width:0;overflow:hidden}
+.decodeInline{display:grid;grid-template-columns:100px minmax(0,1fr);gap:8px;align-items:stretch;width:100%;min-width:0;overflow:hidden}
+.decodeInline .decodeStrip{margin:0;display:block;position:relative;min-height:40px;overflow:hidden;width:100%;min-width:0;font-size:12px;padding:0}
+.decodeTicker{position:absolute;top:50%;left:100%;transform:translateY(-50%);white-space:nowrap;will-change:transform;color:#a8eec0;padding-right:24px;animation:decodeTickerMove 12s linear infinite}
+@keyframes decodeTickerMove{from{transform:translate(0,-50%)}to{transform:translate(calc(-100% - 100vw),-50%)}}
+.decodeStrip.hidden .decodeTicker{animation-play-state:paused}
+.footerStats{display:grid;grid-template-columns:minmax(280px,2.25fr) repeat(6,minmax(72px,.5fr)) minmax(170px,1fr);gap:8px;align-items:center;text-align:left}
+.footerBrand{color:var(--muted);font-size:11px;padding:8px}
+.footerStat{border:1px solid var(--line);background:#0e1418;border-radius:9px;padding:7px 8px;text-align:center}
+.footerStat small{display:block;color:var(--muted);font-size:9px;text-transform:uppercase}
+.footerStat b{font-size:12px;color:var(--text)}
+.footerLike{margin:0;padding:9px}
+@media(max-width:980px){.footerStats{grid-template-columns:repeat(4,1fr)}.footerBrand{grid-column:1/-1}.footerLike{grid-column:span 2}.decodeCtrl{grid-column:1/-1}}
+@media(max-width:650px){.footerStats{grid-template-columns:repeat(2,1fr)}.footerBrand,.footerLike{grid-column:1/-1}.decodeCtrl{grid-column:1/-1}.decodeInline{grid-template-columns:100px 1fr}}
+@media(max-width:980px){
+  .activityPanel{height:auto!important;max-height:none!important;display:flex;flex-direction:column}
+  .activityLog{height:180px;overflow:hidden}
+  .activityDetails{overflow:hidden}
+}
+
+
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">CW</div>
+      <div><h1>CW NETWORK RADIO</h1><small>Free · Open · Worldwide CW</small></div>
+    </div>
+    <div class="links">
+      <a href="https://zp5dxs.github.io/morse-practice/" target="_blank" rel="noopener">Morse Practice</a>
+      <a href="https://zp5dxs.github.io/CW-LATAM/" target="_blank" rel="noopener">CW-LATAM Radar</a>
+      <a href="https://github.com/ZP5DXS/CW-Network#readme" target="_blank" rel="noopener">About</a>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div class="stat"><b id="netState">CONNECTING</b><span>Network</span></div>
+    <div class="stat"><b id="onlineUsers">0</b><span>Operators online</span></div>
+    <div class="stat"><b id="bandActivity">40M · LOW</b><span>Band activity</span></div>
+    <div class="stat"><b id="utc">--:--:--</b><span>UTC</span></div>
+    <div class="stat"><b id="prop">NORMAL</b><span>Virtual propagation</span></div>
+<div class="stat"><b id="serviceState">SERVICE ACTIVE</b><span>Network CW service</span></div>
+  </div>
+
+  <div class="radio">
+    <main class="main">
+      <section class="card display">
+        <div class="freqbox">
+          <div class="band" id="bandLabel">40M · CW</div>
+          <div class="freq" id="freq" aria-label="VFO frequency"></div>
+          <div class="subfreq">
+            <span>FILTER <b id="filterText">600 Hz</b></span>
+            <span>MODE <b>CW</b></span>
+            <span>ANT <b id="antText">2 · ¼λ VERTICAL</b></span>
+          </div>
+          <div class="txflag" id="txFlag">RX</div>
+        </div>
+        <div class="meterbox">
+          <div>
+            <div class="slabels"><span>S1</span><span>S3</span><span>S5</span><span>S7</span><span>S9</span><span>+20</span><span>+40</span></div>
+            <div class="smeter"><div class="sfill" id="sfill"></div></div>
+          </div>
+          <div class="smallgrid">
+            <div class="kpi"><small>Power</small><b id="powerText">50 W</b></div>
+            <div class="kpi"><small>Key speed</small><b id="wpmText">15 WPM</b></div>
+            <div class="kpi"><small>Rotor</small><b id="azText">000°</b></div>
+            <div class="kpi"><small>Signal</small><b id="sigText">S2</b></div>
+          </div>
+          <div class="slabels"><span>Virtual RF engine · client-side</span><span id="toneRead">650 Hz</span></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="waterfall" id="waterfall"><canvas class="wfCanvas" id="wfCanvas"></canvas><div class="wf-tune" id="wfTune"></div></div>
+        <div class="wfscale"><span id="wfL">7.030</span><span id="wfC">7.035</span><span id="wfR">7.040 MHz</span></div>
+
+      </section>
+
+      <section class="card row2">
+        <div class="dialwrap">
+          <div class="dial" id="dial"></div>
+          <div>
+            <h3 style="margin:0 0 8px">VFO</h3>
+            <div class="bandbuttons" id="bandButtons">
+              <button data-band="80">80m</button><button class="active" data-band="40">40m</button>
+              <button data-band="20">20m</button><button data-band="15">15m</button><button data-band="10">10m</button>
+            </div>
+            <div class="vfo-tools">
+  <button id="vfoFast">FAST · OFF</button>
+  <button id="vfoStep">STEP · 10 Hz</button>
+</div>
+
+          </div>
+        </div>
+        <div>
+          <h3 style="margin:0 0 8px">Key input</h3>
+          <div class="keypad" style="grid-template-columns:1fr 1fr">
+            <button class="keybtn active" data-keymode="STRAIGHT">STRAIGHT</button>
+            <button class="keybtn" data-keymode="PADDLE">PADDLE</button>
+          </div>
+          <div class="keybar" id="keybar">SPACE / MOUSE · KEY</div>
+          
+        </div>
+      </section>
+
+      <section class="card controls">
+        <div class="ctrl"><label>Filter</label><select id="filter"><option>2500</option><option>1800</option><option selected>600</option></select></div>
+        <div class="ctrl"><label>NB</label><button id="nb">OFF</button></div>
+        <div class="ctrl"><label>NR</label><button id="nr">OFF</button></div>
+        <div class="ctrl"><label>Waterfall</label><button id="wf" class="active">ON</button></div>
+        <div class="ctrl"><label>Break-in</label><select id="breakin"><option>QSK</option><option selected>SEMI</option><option>OFF</option></select></div>
+        <div class="ctrl"><label>Delay</label><input id="delay" type="range" min="0" max="1200" step="50" value="500"><div id="delayText">500 ms</div></div>
+        <div class="ctrl"><label>Power</label><input id="power" type="range" min="1" max="100" value="50"><div id="powerCtlText">50 W</div></div>
+        <div class="ctrl"><label>Key speed</label><input id="wpm" type="range" min="5" max="45" value="15"><div id="wpmCtlText">15 WPM</div></div>
+        <div class="ctrl"><label>Tone</label><input id="tone" type="range" min="350" max="900" step="10" value="650"><div id="toneCtlText">650 Hz</div></div>
+        <div class="ctrl"><label>Sidetone</label><input id="sideVol" type="range" min="0" max="100" value="45"><div id="sideVolText">45%</div></div>
+        <div class="ctrl"><label>AF / RX volume</label><input id="afVol" type="range" min="0" max="100" value="55"><div id="afVolText">55%</div></div>
+        <div class="ctrl"><label>Keyer mode</label><button id="iambicMode" disabled>A</button></div>
+        <div class="ctrl"><label>Paddle</label><button id="reverse">NORMAL</button></div>
+        <div class="ctrl decodeCtrl">
+          <label>DATA decode</label>
+          <div class="decodeInline">
+            <button id="decode">OFF</button>
+            <div class="decodeStrip hidden" id="mainDecode"><span class="decodeTicker" id="decodeTicker">Listening…</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="side">
+      <section class="card">
+        <h3 style="margin-top:0">Station</h3>
+        <div class="callbox">
+          <input id="callsign" placeholder="CALLSIGN" value="ZP5DXS">
+          <input id="locator" placeholder="LOCATOR" value="">
+        </div>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:0">Only callsign is required. Locator enables distance, bearing and antenna logic.</p>
+      </section>
+
+      <section class="card">
+        <h3 style="margin-top:0">Antenna</h3>
+        <div class="keypad" style="grid-template-columns:1fr 1fr">
+          <button class="keybtn" id="ant1">ANT 1 · 3EL YAGI</button>
+          <button class="keybtn active" id="ant2">ANT 2 · ¼λ VERTICAL</button>
+        </div>
+        <div class="rotor" style="margin-top:12px">
+          <div class="compass"><div class="needle" id="needle"></div></div>
+          <div>
+            <label style="color:var(--muted);font-size:11px">ROTOR AZIMUTH</label>
+            <input id="rotor" type="range" min="0" max="315" step="45" value="0" style="width:100%">
+            <div style="font-size:26px;font-family:ui-monospace,monospace;margin-top:4px"><span id="rotorText">000°</span></div>
+            <small style="color:var(--muted)">8 sectors · 45°</small><div class="rotorStatus" id="rotorStatus">READY</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card activityPanel">
+        <div class="activityHead">
+          <div>
+            <h3 style="margin:0">Network activity</h3>
+            <small>Live network activity</small>
+          </div>
+          <label class="switchLine">
+            <span>Show services</span>
+            <input type="checkbox" id="activityDetailsToggle">
+            <span class="switchUi"></span>
+          </label>
+        </div>
+<div class="log activityLog" id="log">
+          <div><time>--:--:--</time>Local radio ready.</div>
+          <div><time>--:--:--</time>Connecting to Render WebSocket…</div>
+          <div><time>--:--:--</time>Persistence disabled for this first realtime build.</div>
+        </div>
+
+        <div class="activityDetails" id="activityDetails">
+          <div class="activityDivider"></div>
+          <div id="npcList"></div>
+          
+        </div>
+      </section>
+
+
+
+
+
+
+    </aside>
+  </div>
+
+  <footer class="footer footerStats">
+    <div class="footerBrand">
+      <div class="footerTitle">CW NETWORK RADIO <span>· v0.20</span></div>
+      <div class="footerTag">Free · No ads · Open web · Worldwide CW</div>
+      <div class="flagMarquee" aria-label="Worldwide CW">
+        <div class="flagTrack">
+          <span>🇵🇾</span><span>🇦🇷</span><span>🇧🇷</span><span>🇺🇾</span><span>🇨🇱</span><span>🇵🇪</span><span>🇨🇴</span><span>🇺🇸</span><span>🇨🇦</span><span>🇲🇽</span><span>🇪🇸</span><span>🇵🇹</span><span>🇫🇷</span><span>🇩🇪</span><span>🇮🇹</span><span>🇬🇧</span><span>🇯🇵</span><span>🇦🇺</span><span>🇳🇿</span><span>🇿🇦</span>
+          <span>🇵🇾</span><span>🇦🇷</span><span>🇧🇷</span><span>🇺🇾</span><span>🇨🇱</span><span>🇵🇪</span><span>🇨🇴</span><span>🇺🇸</span><span>🇨🇦</span><span>🇲🇽</span><span>🇪🇸</span><span>🇵🇹</span><span>🇫🇷</span><span>🇩🇪</span><span>🇮🇹</span><span>🇬🇧</span><span>🇯🇵</span><span>🇦🇺</span><span>🇳🇿</span><span>🇿🇦</span>
+        </div>
+      </div>
+    </div>
+    <div class="footerStat"><small>Session</small><b id="sessionTime">00:00:00</b></div>
+    <div class="footerStat"><small>QSOs</small><b id="qsoStat">0</b></div>
+    <div class="footerStat"><small>TX</small><b id="txTimeStat">00:00</b></div>
+    <div class="footerStat"><small>Bands</small><b id="bandsUsedStat">1</b></div>
+    <div class="footerStat"><small>Visits</small><b id="visitStat">LOCAL</b></div>
+    <div class="footerStat"><small>Countries</small><b id="countryStat">LOCAL</b></div>
+    <button class="likeBtn footerLike" id="likeBtn">♡ Send 73 / Like · <span id="likeCount">0</span></button>
+  </footer>
+</div>
+
+<script src="radio.js" defer></script>
+</body>
+</html>
