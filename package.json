@@ -1,6 +1,6 @@
 {
   "name": "cw-network",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "private": true,
   "type": "module",
   "description": "Realtime backend for CW Network Radio",
@@ -12,6 +12,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "@huggingface/transformers": "^4.2.0"
   }
 }

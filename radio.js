@@ -13,7 +13,7 @@
   let band = 40, hz = bands[40].center, tx=false, keyMode='STRAIGHT', antenna=2;
   let audioCtx, osc, gain;
   let lastKeyDown=0;
-  let vfoStep=10, vfoFast=false;
+  let vfoStep=10, vfoFast=false, vfoTuneMode='NORMAL', scanTimer=null, scanHoldUntil=0;
   let selectedDigitPower=10;
   let rotorTarget=0, rotorActual=0, rotorTimer=null;
   let paddleDit=false, paddleDah=false;
@@ -131,6 +131,7 @@
     hz=Math.max(bands[band].min,Math.min(bands[band].max,hz));
   }
   function tuneBy(delta){
+    if(vfoTuneMode==='SCAN') setTuneMode('NORMAL');
     hz += delta; clampHz();
     const rot=((hz-bands[band].center)/1000)*14;
     $('#dial').style.setProperty('--rot',rot+'deg');
@@ -144,6 +145,7 @@
     const x=Math.max(0,Math.min(r.width,e.clientX-r.left));
     const b=bands[band];
     const target=b.min + (x/r.width)*(b.max-b.min);
+    if(vfoTuneMode==='SCAN') setTuneMode('NORMAL');
     hz=Math.round(target);
     clampHz();
     redraw();
@@ -214,10 +216,52 @@
     tuneBy(e.deltaY<0?selectedDigitPower:-selectedDigitPower);
   },{passive:false});
 
+  function stopScan(){
+    if(scanTimer){ clearInterval(scanTimer); scanTimer=null; }
+    scanHoldUntil=0;
+  }
+  function scanSignalNear(){
+    let best=null, bestDf=Infinity;
+    for(const [id,v] of remoteVoices){
+      if(!v.down) continue;
+      const st=remoteStations.get(id);
+      if(!st || st.band!==band) continue;
+      const df=Math.abs((st.hz||0)-hz);
+      if(df<bestDf){ bestDf=df; best=st; }
+    }
+    return bestDf<=480 ? best : null;
+  }
+  function startScan(){
+    stopScan();
+    scanTimer=setInterval(()=>{
+      if(vfoTuneMode!=='SCAN') return stopScan();
+      const hit=scanSignalNear();
+      if(hit){
+        hz=Math.round(hit.hz); clampHz(); redraw(); scheduleStateSend();
+        scanHoldUntil=Date.now()+2200;
+        $('#vfoFast').textContent='TUNE · SCAN HOLD';
+        return;
+      }
+      if(scanHoldUntil && Date.now()<scanHoldUntil) return;
+      if(scanHoldUntil && Date.now()>=scanHoldUntil){
+        scanHoldUntil=0; $('#vfoFast').textContent='TUNE · SCAN';
+      }
+      hz += 50;
+      if(hz>bands[band].max) hz=bands[band].min;
+      redraw();
+      scheduleStateSend();
+    },90);
+  }
+  function setTuneMode(mode){
+    vfoTuneMode=mode;
+    vfoFast=mode==='FAST';
+    $('#vfoFast').classList.toggle('active',mode!=='NORMAL');
+    $('#vfoFast').textContent='TUNE · '+mode;
+    if(mode==='SCAN') startScan(); else stopScan();
+  }
   $('#vfoFast').onclick=()=>{
-    vfoFast=!vfoFast;
-    $('#vfoFast').classList.toggle('active',vfoFast);
-    $('#vfoFast').textContent='FAST · '+(vfoFast?'ON':'OFF');
+    const next=vfoTuneMode==='NORMAL'?'FAST':(vfoTuneMode==='FAST'?'SCAN':'NORMAL');
+    setTuneMode(next);
   };
   const steps=[1,10,100,1000];
   $('#vfoStep').onclick=()=>{
@@ -228,6 +272,7 @@
 
   $$('#bandButtons button').forEach(btn=>btn.onclick=()=>{
     const nextBand=+btn.dataset.band;
+    if(vfoTuneMode==='SCAN') setTuneMode('NORMAL');
     if(nextBand===band) return;
 
     $$('#bandButtons button').forEach(b=>b.classList.remove('active'));
@@ -436,7 +481,7 @@
     if(!noiseGain || !audioCtx) return;
     const bw=+$('#filter').value;
     const widthFactor={600:.58,1800:.88,2500:1}[bw]||1;
-    const base={80:.105,40:.085,20:.062,15:.052,10:.046}[band]||.06;
+    const base={80:.145,40:.115,20:.072,15:.050,10:.036}[band]||.065;
     const nr=$('#nr').classList.contains('active')?.46:1;
     noiseGain.gain.setTargetAtTime(base*widthFactor*nr,audioCtx.currentTime,.08);
     if(noiseBandpass){
@@ -450,7 +495,7 @@
   function scheduleQrn(){
     clearTimeout(qrnTimer);
     if(!audioCtx) return;
-    const bandRate={80:1.0,40:.82,20:.55,15:.40,10:.32}[band]||.5;
+    const bandRate={80:1.25,40:1.00,20:.58,15:.36,10:.24}[band]||.5;
     const kp=Number.isFinite(spaceWeather.kp)?spaceWeather.kp:2;
     const delay=(1500+Math.random()*5200)/Math.max(.45,bandRate*(1+kp*.05));
     qrnTimer=setTimeout(()=>{
@@ -1088,7 +1133,7 @@
     for(const [id,v] of remoteVoices){ if(!v.down) continue; const st=remoteStations.get(id); if(st) strongest=Math.max(strongest,receiveGainFor(st)); }
     const bw=+$('#filter').value;
     const nr=$('#nr').classList.contains('active')?.55:1;
-    const noise=({80:.12,40:.095,20:.07,15:.058,10:.05}[band]||.065)*({600:.58,1800:.88,2500:1}[bw]||1)*nr;
+    const noise=({80:.15,40:.12,20:.075,15:.052,10:.038}[band]||.07)*({600:.58,1800:.88,2500:1}[bw]||1)*nr;
     const level=Math.min(1,noise+strongest);
     $('#sfill').style.width=(4+level*92)+'%';
     const s=Math.max(1,Math.min(9,Math.round(level*10)));
