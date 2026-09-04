@@ -45,9 +45,10 @@
   let stateSendTimer=null, connectedOnce=false;
   const remoteStations=new Map();
   const remoteVoices=new Map();
-  let rxMaster=null, noiseGain=null, noiseSource=null, noiseBandpass=null;
+  let rxMaster=null, rxGate=null, noiseGain=null, noiseSource=null, noiseBandpass=null;
   let meterTimer=null, qrnTimer=null, qrnBuffer=null;
   let audioUnlocked=false;
+  let rxReturnTimer=null;
   const directHeld=new Set();
   const decoderStates=new Map();
   const MORSE_DECODE={
@@ -379,8 +380,9 @@
       audioCtx=new AC();
       gain=audioCtx.createGain(); gain.gain.value=0;
       rxMaster=audioCtx.createGain(); rxMaster.gain.value=0.55;
+      rxGate=audioCtx.createGain(); rxGate.gain.value=1;
       gain.connect(audioCtx.destination);
-      rxMaster.connect(audioCtx.destination);
+      rxMaster.connect(rxGate); rxGate.connect(audioCtx.destination);
       osc=audioCtx.createOscillator();
       osc.type='sine';
       osc.frequency.value=+$('#tone').value;
@@ -473,9 +475,31 @@
     gain.gain.setValueAtTime(gain.gain.value,t);
     gain.gain.linearRampToValueAtTime(to,t+ms/1000);
   }
+
+  function setRxGate(open,ms=5){
+    if(!ensureAudio() || !audioCtx || !rxGate) return;
+    const t=audioCtx.currentTime;
+    rxGate.gain.cancelScheduledValues(t);
+    rxGate.gain.setTargetAtTime(open?1:0,t,Math.max(.002,ms/1000));
+  }
+  function txRxSwitchDown(){
+    clearTimeout(rxReturnTimer);
+    const mode=$('#breakin').value;
+    if(mode==='QSK') setRxGate(false,2);
+    else if(mode==='SEMI') setRxGate(false,4);
+    else setRxGate(false,4);
+  }
+  function txRxSwitchUp(){
+    clearTimeout(rxReturnTimer);
+    const mode=$('#breakin').value;
+    if(mode==='QSK'){ setRxGate(true,2); return; }
+    const hold=mode==='SEMI' ? +$('#delay').value : 1000;
+    rxReturnTimer=setTimeout(()=>setRxGate(true,8),hold);
+  }
   function keyDown(){
     if(tx) return;
     tx=true; lastKeyDown=performance.now(); txStartMs=Date.now();
+    txRxSwitchDown();
     wfKeyDown('LOCAL',hz,'human');
     $('#txFlag').textContent='TX'; $('#txFlag').classList.add('tx');
     $('#keybar').classList.add('down'); $('#keybar').textContent='TX · KEY DOWN';
@@ -493,6 +517,7 @@
     $('#keybar').textContent=keyMode==='STRAIGHT'?'SPACE / CTRL / [ ] / MOUSE · KEY':(iambicMode==='BUG'?'PADDLE · BUG':'PADDLE · IAMBIC '+iambicMode);
     updateSmeter();
     ramp(0,5);
+    txRxSwitchUp();
     sendNet({type:'key_up', band, hz, seq:++netSeq, t:Date.now()});
   }
   function isDitCode(e){ return e.code==='ControlLeft' || e.code==='BracketLeft'; }
@@ -872,6 +897,12 @@
         ?'NOAA · UNAVAILABLE'
         :`Kp ${spaceWeather.kp?.toFixed(1)??'–'} · SFI ${spaceWeather.sfi??'–'}`;
       refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn();
+      return;
+    }
+    if(m.type==='qso_complete'){
+      qsoCount++;
+      $('#qsoStat').textContent=qsoCount;
+      log('QSO completed'+(m.with?' with '+m.with:'')+'.');
       return;
     }
     if(m.type==='service_text') return;
