@@ -47,6 +47,7 @@ function rateOK(state,type){
  state.rate.msg++;return state.rate.msg<=40;
 }
 
+const SERVER_STARTED_AT=new Date().toISOString();
 const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/SmolLM2-135M-Instruct-ONNX-MHA';
 const AI_ENABLED=process.env.CWN_AI_ENABLED!=='0';
 let aiState=AI_ENABLED?'STARTING':'DISABLED',aiWorker=null,aiBusy=false,aiReqSeq=0,aiLastError='',aiReadyAt=null;
@@ -335,9 +336,10 @@ const server=http.createServer((req,res)=>{
  if(req.url==='/'||req.url==='/health'){
   res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
   res.end(JSON.stringify({
-   ok:true,service:'CW Network',version:'0.25',
+   ok:true,service:'CW Network',version:'0.26',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiBusy,aiReadyAt,aiError:aiLastError||null,model:AI_MODEL,
+   aiPid:aiWorker?.pid||null,startedAt:SERVER_STARTED_AT,
    memoryMB:Math.round(process.memoryUsage().rss/1024/1024),
    uptime:Math.round(process.uptime()),spaceWeather
   }));return;

@@ -900,6 +900,28 @@
       lastStateSent=sig; sendNet(p);
     },final?0:60);
   }
+  function silenceAllRemoteVoices(reason='network reset'){
+    if(audioCtx){
+      const now=audioCtx.currentTime;
+      for(const [id,v] of remoteVoices){
+        try{
+          v.down=false;
+          if(v.safetyTimer){ clearTimeout(v.safetyTimer); v.safetyTimer=null; }
+          v.gain.gain.cancelScheduledValues(now);
+          v.gain.gain.setTargetAtTime(0,now,.008);
+        }catch(_){}
+        try{ wfKeyUp(id); }catch(_){}
+      }
+    }else{
+      for(const [id,v] of remoteVoices){
+        v.down=false;
+        if(v.safetyTimer){ clearTimeout(v.safetyTimer); v.safetyTimer=null; }
+        try{ wfKeyUp(id); }catch(_){}
+      }
+    }
+    updateSmeter();
+  }
+
   function connectNetwork(){
     clearTimeout(reconnectTimer);
     const generation=++socketGeneration;
@@ -917,6 +939,7 @@
     };
     sock.onclose=()=>{
       if(generation!==socketGeneration) return;
+      silenceAllRemoteVoices('socket close');
       $('#netState').textContent='RECONNECTING';
       log('Network connection lost. Reconnecting…');
       scheduleReconnect();
@@ -1121,9 +1144,15 @@
     if(!v){
       const o=audioCtx.createOscillator(); o.type='sine';
       const g=audioCtx.createGain(); g.gain.value=0; o.connect(g); g.connect(rxMaster); o.start();
-      v={osc:o,gain:g,down:false,qsbRate:.055+Math.random()*.075,qsbPhase:Math.random()*Math.PI*2}; remoteVoices.set(m.stationId,v);
+      v={osc:o,gain:g,down:false,safetyTimer:null,qsbRate:.055+Math.random()*.075,qsbPhase:Math.random()*Math.PI*2}; remoteVoices.set(m.stationId,v);
     }
-    v.down=true; decoderKeyDown(st);
+    v.down=true;
+    if(v.safetyTimer) clearTimeout(v.safetyTimer);
+    // Network-loss guard: no single CW mark should be able to remain keyed forever.
+    v.safetyTimer=setTimeout(()=>{
+      if(v.down) remoteKeyUp(m.stationId);
+    },2200);
+    decoderKeyDown(st);
     const offset=(m.hz||st.hz||hz)-hz;
     const f=Math.max(160,Math.min(1800,+$('#tone').value+offset));
     v.osc.frequency.setTargetAtTime(f,audioCtx.currentTime,.005);
@@ -1136,6 +1165,7 @@
     wfKeyUp(id);
     const st=remoteStations.get(id); if(st) decoderKeyUp(st);
     const v=remoteVoices.get(id); if(!v||!audioCtx) return;
+    if(v.safetyTimer){ clearTimeout(v.safetyTimer); v.safetyTimer=null; }
     v.down=false; v.gain.gain.cancelScheduledValues(audioCtx.currentTime); v.gain.gain.setTargetAtTime(0,audioCtx.currentTime,.006);
     updateSmeter();
   }
