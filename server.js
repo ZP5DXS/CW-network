@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
+import { fork } from 'node:child_process';
 
 const PORT=Number(process.env.PORT||10000);
 const VALID_BANDS=new Set([80,40,20,15,10]);
@@ -20,6 +21,12 @@ const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
 const safeText=(v,n=32)=>String(v??'').replace(/[^A-Z0-9/\- ?.,]/gi,'').toUpperCase().slice(0,n);
 function send(ws,obj){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(obj))}
 function broadcast(obj,except=null){const raw=JSON.stringify(obj);for(const [ws] of clients)if(ws!==except&&ws.readyState===WebSocket.OPEN)ws.send(raw)}
+function broadcastBand(b,obj,except=null){
+ const raw=JSON.stringify(obj);
+ for(const [ws,state] of clients){
+  if(ws!==except&&state.band===b&&ws.readyState===WebSocket.OPEN)ws.send(raw);
+ }
+}
 function wsForStation(stationId){for(const [ws,s] of clients)if(s.stationId===stationId)return ws;return null}
 function publicState(s){return {stationId:s.stationId,kind:s.kind,callsign:s.callsign,locator:s.locator,band:s.band,hz:s.hz,power:s.power,antenna:s.antenna,azimuth:s.azimuth,wpm:s.wpm,keyMode:s.keyMode,iambicMode:s.iambicMode,keyDown:!!s.keyDown}}
 function recordTx(b){const now=Date.now(),a=recentBandTx.get(b)||[];a.push(now);while(a.length&&a[0]<now-120000)a.shift();recentBandTx.set(b,a)}
@@ -41,20 +48,59 @@ function rateOK(state,type){
 }
 
 const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/SmolLM2-135M-Instruct-ONNX-MHA';
-let aiPipe=null,aiLoading=null,aiState='OFFLINE';
-async function loadAI(){
- if(aiPipe)return aiPipe;if(aiLoading)return aiLoading;
- aiState='LOADING';
- aiLoading=(async()=>{
-  try{
-   const {pipeline}=await import('@huggingface/transformers');
-   aiPipe=await pipeline('text-generation',AI_MODEL,{dtype:'q4'});
-   aiState='READY';console.log('AI ready:',AI_MODEL);return aiPipe;
-  }catch(err){aiState='FALLBACK';console.error('AI load failed:',err?.message||err);return null}
- })();
- return aiLoading;
+const AI_ENABLED=process.env.CWN_AI_ENABLED!=='0';
+let aiState=AI_ENABLED?'STARTING':'DISABLED',aiWorker=null,aiBusy=false,aiReqSeq=0,aiLastError='',aiReadyAt=null;
+const aiPending=new Map();
+
+function failAIPending(reason='AI unavailable'){
+ for(const [rid,p] of aiPending){clearTimeout(p.timer);p.resolve(null)}
+ aiPending.clear();aiBusy=false;aiLastError=reason;
 }
-setTimeout(()=>loadAI(),1500);
+function startAIWorker(){
+ if(!AI_ENABLED||aiWorker)return;
+ aiState='LOADING';
+ try{
+  aiWorker=fork(new URL('./ai-worker.js',import.meta.url),[],{
+   stdio:['ignore','inherit','inherit','ipc'],
+   env:{...process.env,CWN_AI_MODEL:AI_MODEL}
+  });
+  aiWorker.on('message',m=>{
+   if(!m||typeof m!=='object')return;
+   if(m.type==='state'){
+    aiState=m.state||aiState;
+    if(m.error)aiLastError=String(m.error).slice(0,160);
+    if(aiState==='READY')aiReadyAt=new Date().toISOString();
+    return;
+   }
+   if(m.type==='result'){
+    const p=aiPending.get(m.id);if(!p)return;
+    clearTimeout(p.timer);aiPending.delete(m.id);aiBusy=false;
+    p.resolve(m.ok?m.text:null);
+   }
+  });
+  aiWorker.on('error',err=>{aiState='FALLBACK';failAIPending(err?.message||'AI worker error')});
+  aiWorker.on('exit',(code,signal)=>{
+   aiWorker=null;
+   if(aiState!=='DISABLED'){aiState='FALLBACK';failAIPending(`AI worker exit ${code??''} ${signal??''}`.trim())}
+  });
+ }catch(err){
+  aiState='FALLBACK';aiLastError=err?.message||String(err);
+ }
+}
+setTimeout(startAIWorker,8000);
+
+function requestAI(prompt,{timeout=9000}={}){
+ if(aiState!=='READY'||!aiWorker||!aiWorker.connected||aiBusy)return Promise.resolve(null);
+ aiBusy=true;const rid=++aiReqSeq;
+ return new Promise(resolve=>{
+  const timer=setTimeout(()=>{
+   aiPending.delete(rid);aiBusy=false;resolve(null);
+  },timeout);
+  aiPending.set(rid,{resolve,timer});
+  try{aiWorker.send({type:'generate',id:rid,prompt})}
+  catch(_){clearTimeout(timer);aiPending.delete(rid);aiBusy=false;resolve(null)}
+ });
+}
 
 const personaStyles=[
  {role:'SKCC',wpm:[11,16],keyMode:'STRAIGHT',tone:'friendly slow traditional CW operator'},
@@ -108,7 +154,7 @@ function setBotActive(st,on){
 function rebalanceBots(){
  for(const b of VALID_BANDS){
   const humans=humansOnBand(b);
-  const target=humans===0?4:humans<=2?3:humans<=5?2:1;
+  const target=humans===0?3:humans<=2?3:humans<=5?2:1;
   const pool=[...bots.values()].filter(x=>x.band===b),active=pool.filter(x=>x.active);
   if(active.length<target)pool.filter(x=>!x.active).slice(0,target-active.length).forEach(x=>setBotActive(x,true));
   if(active.length>target)active.filter(x=>!x.busy&&x.state==='LISTEN').slice(target).forEach(x=>setBotActive(x,false));
@@ -130,8 +176,8 @@ function transmitVirtual(st,text,{service=false,after=null}={}){
  text=safeText(text,180).replace(/\s+/g,' ').trim();if(!text)return false;
  st.busy=true;st.lastText=text;st.history=(st.history||[]).concat(text).slice(-6);
  const {events,duration}=morseTimeline(text,st.wpm),kind=service?'service':'human';
- events.forEach(ev=>setTimeout(()=>{if(ev.down){st.keyDown=true;recordTx(st.band);broadcast({type:'key_down',stationId:st.stationId,kind,band:st.band,hz:st.hz,power:st.power,callsign:st.callsign,locator:st.locator,seq:++serverSeq,t:Date.now()})}else{st.keyDown=false;broadcast({type:'key_up',stationId:st.stationId,seq:++serverSeq,t:Date.now()})}},ev.at));
- if(service)broadcast({type:'service_text',band:st.band,hz:st.hz,text});
+ events.forEach(ev=>setTimeout(()=>{if(ev.down){st.keyDown=true;recordTx(st.band);broadcastBand(st.band,{type:'key_down',stationId:st.stationId,kind,band:st.band,hz:st.hz,power:st.power,callsign:st.callsign,locator:st.locator,seq:++serverSeq,t:Date.now()})}else{st.keyDown=false;broadcastBand(st.band,{type:'key_up',stationId:st.stationId,seq:++serverSeq,t:Date.now()})}},ev.at));
+ if(service)broadcastBand(st.band,{type:'service_text',band:st.band,hz:st.hz,text});
  setTimeout(()=>{st.busy=false;st.lastAction=Date.now();if(after)after()},duration+120);
  return true;
 }
@@ -139,12 +185,14 @@ function fallbackReply(bot,other,stage='QSO'){
  const oc=other.callsign||'STN';
  if(stage==='CALL')return `${oc} DE ${bot.callsign} ${bot.callsign} K`;
  if(stage==='CLOSE')return `${oc} DE ${bot.callsign} TU FB QSO 73 SK`;
- const options=[
-  `${oc} DE ${bot.callsign} GM UR 579 NAME ${bot.name} QTH ${bot.qth} HW BK`,
-  `${oc} DE ${bot.callsign} R R FB COPY UR SIG 589 TNX CALL BK`,
-  `${oc} DE ${bot.callsign} FB ${oc} NICE CW HERE WX FINE HW BK`,
-  `${oc} DE ${bot.callsign} TNX INFO RUNNING ${bot.power}W ANT VERTICAL BK`
- ];
+ const byRole={
+  DX:[`${oc} DE ${bot.callsign} UR 599 599 TU BK`,`${oc} DE ${bot.callsign} R R 5NN NAME ${bot.name} BK`],
+  SKCC:[`${oc} DE ${bot.callsign} GM UR 579 NAME ${bot.name} QTH ${bot.qth} HW BK`,`${oc} DE ${bot.callsign} FB COPY NICE FIST NAME ${bot.name} BK`],
+  BUG:[`${oc} DE ${bot.callsign} R R FB COPY UR SIG 589 NAME ${bot.name} BK`,`${oc} DE ${bot.callsign} TNX CALL RUNNING ${bot.power}W HW BK`],
+  RAGCHEW:[`${oc} DE ${bot.callsign} GM NAME ${bot.name} QTH ${bot.qth} WX FINE HR HW BK`,`${oc} DE ${bot.callsign} FB INFO NICE CW RUNNING ${bot.power}W VERTICAL HW BK`],
+  HUNTER:[`${oc} DE ${bot.callsign} UR 579 NAME ${bot.name} QTH ${bot.qth} BK`,`${oc} DE ${bot.callsign} R R FB SIG 589 TNX CALL BK`]
+ };
+ const options=byRole[bot.role]||byRole.HUNTER;
  return options[Math.floor(Math.random()*options.length)];
 }
 function cleanAIText(raw,bot,other){
@@ -156,18 +204,15 @@ function cleanAIText(raw,bot,other){
  return s||fallbackReply(bot,other);
 }
 async function aiReply(bot,other,context,stage='QSO'){
- const pipe=await loadAI();
- if(!pipe)return fallbackReply(bot,other,stage);
- const prompt=`You are ${bot.callsign}, a simulated amateur radio CW operator. Style: ${bot.tone}. Name ${bot.name}. QTH ${bot.qth}. Power ${bot.power} W. 
-Reply to ${other.callsign||'STN'} in authentic concise amateur-radio CW abbreviations. One transmission only, max 22 words. Uppercase. No prose, no markdown, no explanation.
+ const prompt=`You are ${bot.callsign}, a simulated amateur radio CW operator. Style: ${bot.tone}. Name ${bot.name}. QTH ${bot.qth}. Power ${bot.power} W.
+Reply to ${other.callsign||'STN'} in authentic concise amateur-radio CW abbreviations. One transmission only, max 20 words. Uppercase. No prose, no markdown, no explanation.
 Stage: ${stage}. Recent context: ${context||'none'}.
 Always include both callsigns when practical. End with BK if conversation continues, K if awaiting first reply, or 73 SK if closing.
 ANSWER:`;
  try{
-  const out=await pipe(prompt,{max_new_tokens:70,temperature:.82,top_p:.92,repetition_penalty:1.08,return_full_text:false});
-  const raw=Array.isArray(out)?out[0]?.generated_text:'';
-  return cleanAIText(raw,bot,other);
- }catch(err){console.error('AI inference:',err?.message||err);return fallbackReply(bot,other,stage)}
+  const raw=await requestAI(prompt,{timeout:8500});
+  return raw?cleanAIText(raw,bot,other):fallbackReply(bot,other,stage);
+ }catch(err){return fallbackReply(bot,other,stage)}
 }
 
 function findHumanNear(bot,span=500){return [...clients.values()].find(s=>s.band===bot.band&&Math.abs(s.hz-bot.hz)<=span)}
@@ -216,7 +261,7 @@ async function trafficDirector(){
   const recent=(recentBandTx.get(b)||[]).filter(t=>t>Date.now()-18000).length;
   if(recent<8){
    const candidate=active.find(x=>x.state==='LISTEN'&&Date.now()-x.lastAction>10000);
-   if(candidate&&Math.random()<(humans<=1?.48:.28)){botCallCQ(candidate);continue}
+   if(candidate&&Math.random()<(humans<=1?.55:.30)){botCallCQ(candidate);continue}
   }
   // Hunters occasionally retune, mimicking band search.
   const hunter=active.find(x=>x.state==='LISTEN'&&x.role==='HUNTER'&&Date.now()-x.lastAction>12000);
@@ -289,25 +334,31 @@ function serverKeyUp(st,now){
 const server=http.createServer((req,res)=>{
  if(req.url==='/'||req.url==='/health'){
   res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
-  res.end(JSON.stringify({ok:true,service:'CW Network',version:'0.24',clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,ai:aiState,model:AI_MODEL,uptime:Math.round(process.uptime()),spaceWeather}));return;
+  res.end(JSON.stringify({
+   ok:true,service:'CW Network',version:'0.25',
+   clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
+   ai:aiState,aiBusy,aiReadyAt,aiError:aiLastError||null,model:AI_MODEL,
+   memoryMB:Math.round(process.memoryUsage().rss/1024/1024),
+   uptime:Math.round(process.uptime()),spaceWeather
+  }));return;
  }
  res.writeHead(404);res.end('Not found');
 });
 const wss=new WebSocketServer({server,maxPayload:16*1024});
 wss.on('connection',(ws)=>{
  const stationId=id('u');
- const state={stationId,kind:'human',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),keyDown:false,rate:null,decoder:null};
+ const state={stationId,kind:'human',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),keyDown:false,rate:null,decoder:null,missedPongs:0};
  clients.set(ws,state);ws.isAlive=true;send(ws,{type:'welcome',stationId,serverTime:Date.now()});send(ws,spaceWeather);snapshotFor(ws);presence();rebalanceBots();
- ws.on('pong',()=>{ws.isAlive=true;state.lastSeen=Date.now()});
+ ws.on('pong',()=>{ws.isAlive=true;state.missedPongs=0;state.lastSeen=Date.now()});
  ws.on('message',buf=>{
   state.lastSeen=Date.now();if(buf.length>16*1024)return ws.close(1009,'payload');
   let m;try{m=JSON.parse(buf.toString())}catch{return}if(!rateOK(state,m.type))return;const now=Date.now();
   if(m.type==='station_state'){const old=JSON.stringify(publicState(state)),next=sanitizeState(m,state);next.stationId=stationId;next.kind='human';Object.assign(state,next);if(old!==JSON.stringify(publicState(state)))broadcast({type:'station_state',...publicState(state)},ws);return}
-  if(m.type==='key_down'){if(state.keyDown)return;state.keyDown=true;const [lo,hi]=BAND_LIMITS[state.band];state.hz=clamp(Math.round(Number(m.hz)||state.hz),lo,hi);serverKeyDown(state,now);recordTx(state.band);broadcast({type:'key_down',stationId,kind:'human',band:state.band,hz:state.hz,power:state.power,callsign:state.callsign,locator:state.locator,seq:++serverSeq,t:now},ws);return}
-  if(m.type==='key_up'){if(!state.keyDown)return;state.keyDown=false;serverKeyUp(state,now);broadcast({type:'key_up',stationId,seq:++serverSeq,t:now},ws);return}
+  if(m.type==='key_down'){if(state.keyDown)return;state.keyDown=true;const [lo,hi]=BAND_LIMITS[state.band];state.hz=clamp(Math.round(Number(m.hz)||state.hz),lo,hi);serverKeyDown(state,now);recordTx(state.band);broadcastBand(state.band,{type:'key_down',stationId,kind:'human',band:state.band,hz:state.hz,power:state.power,callsign:state.callsign,locator:state.locator,seq:++serverSeq,t:now},ws);return}
+  if(m.type==='key_up'){if(!state.keyDown)return;state.keyDown=false;serverKeyUp(state,now);broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:now},ws);return}
   if(m.type==='leave')ws.close(1000,'bye');
  });
- ws.on('close',()=>{if(state.keyDown)broadcast({type:'key_up',stationId,seq:++serverSeq,t:Date.now()},ws);if(state.decoder){clearTimeout(state.decoder.charTimer);clearTimeout(state.decoder.phraseTimer)}clients.delete(ws);broadcast({type:'station_left',stationId});presence();rebalanceBots()});
+ ws.on('close',()=>{if(state.keyDown)broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:Date.now()},ws);if(state.decoder){clearTimeout(state.decoder.charTimer);clearTimeout(state.decoder.phraseTimer)}clients.delete(ws);broadcast({type:'station_left',stationId});presence();rebalanceBots()});
 });
 
 function serviceCycle(){
@@ -329,7 +380,17 @@ async function refreshSpaceWeather(){
 }
 refreshSpaceWeather();setInterval(refreshSpaceWeather,15*60*1000);
 setInterval(presence,5000);
-setInterval(()=>{for(const [ws,state] of clients){if(ws.isAlive===false||Date.now()-state.lastSeen>90000){ws.terminate();continue}ws.isAlive=false;try{ws.ping()}catch{}}},30000);
+setInterval(()=>{
+ for(const [ws,state] of clients){
+  const stale=Date.now()-state.lastSeen>180000;
+  if(stale||state.missedPongs>=3){try{ws.terminate()}catch{};continue}
+  state.missedPongs=(state.missedPongs||0)+1;ws.isAlive=false;
+  try{ws.ping()}catch{}
+ }
+},45000);
 setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.last>5*60*1000)qsoSessions.delete(k)},60000);
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.24 listening on ${PORT}`));
+process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
+process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
+
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.25 listening on ${PORT}`));

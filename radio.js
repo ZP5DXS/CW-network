@@ -41,7 +41,7 @@
 
   // -------- Realtime network / RF engine --------
   const WS_URL = document.querySelector('meta[name="cw-ws-url"]')?.content || 'wss://cw-network.onrender.com';
-  let ws=null, reconnectTimer=null, stationId=null, netSeq=0, lastStateSent='';
+  let ws=null, reconnectTimer=null, stationId=null, netSeq=0, lastStateSent='', reconnectAttempts=0, socketGeneration=0;
   let stateSendTimer=null, connectedOnce=false;
   const remoteStations=new Map();
   const remoteVoices=new Map();
@@ -902,17 +902,37 @@
   }
   function connectNetwork(){
     clearTimeout(reconnectTimer);
+    const generation=++socketGeneration;
+    if(ws && (ws.readyState===WebSocket.OPEN || ws.readyState===WebSocket.CONNECTING)){
+      try{ ws.onclose=null; ws.close(); }catch(_){}
+    }
     $('#netState').textContent=connectedOnce?'RECONNECTING':'CONNECTING';
-    try{ ws=new WebSocket(WS_URL); }catch(e){ return scheduleReconnect(); }
-    ws.onopen=()=>{
+    let sock;
+    try{ sock=new WebSocket(WS_URL); ws=sock; }catch(e){ return scheduleReconnect(); }
+    sock.onopen=()=>{
+      if(generation!==socketGeneration) return;
+      reconnectAttempts=0;
       connectedOnce=true; $('#netState').textContent='ONLINE'; log('Network connected.');
       lastStateSent=''; scheduleStateSend(true);
     };
-    ws.onclose=()=>{ $('#netState').textContent='RECONNECTING'; log('Network connection lost. Reconnecting…'); scheduleReconnect(); };
-    ws.onerror=()=>{};
-    ws.onmessage=e=>{ try{ handleNet(JSON.parse(e.data)); }catch(_){} };
+    sock.onclose=()=>{
+      if(generation!==socketGeneration) return;
+      $('#netState').textContent='RECONNECTING';
+      log('Network connection lost. Reconnecting…');
+      scheduleReconnect();
+    };
+    sock.onerror=()=>{};
+    sock.onmessage=e=>{
+      if(generation!==socketGeneration) return;
+      try{ handleNet(JSON.parse(e.data)); }catch(_){}
+    };
   }
-  function scheduleReconnect(){ clearTimeout(reconnectTimer); reconnectTimer=setTimeout(connectNetwork,2500); }
+  function scheduleReconnect(){
+    clearTimeout(reconnectTimer);
+    reconnectAttempts=Math.min(6,reconnectAttempts+1);
+    const delay=Math.min(10000,1200*Math.pow(1.7,reconnectAttempts-1))+Math.random()*450;
+    reconnectTimer=setTimeout(connectNetwork,delay);
+  }
 
   function handleNet(m){
     if(m.type==='welcome'){ stationId=m.stationId||stationId; return; }
