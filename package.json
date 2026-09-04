@@ -1,6 +1,6 @@
 {
   "name": "cw-network",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "private": true,
   "type": "module",
   "description": "Realtime backend for CW Network Radio",
@@ -9,7 +9,7 @@
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": "20.x"
   },
   "dependencies": {
     "ws": "^8.18.3",

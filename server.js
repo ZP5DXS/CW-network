@@ -48,14 +48,16 @@ function rateOK(state,type){
 }
 
 const SERVER_STARTED_AT=new Date().toISOString();
-const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/SmolLM2-135M-Instruct-ONNX';
-const AI_DTYPE=process.env.CWN_AI_DTYPE||'q4f16';
+const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/SmolLM-135M-Instruct-ONNX';
+const AI_REQUESTED_DTYPE=(process.env.CWN_AI_DTYPE||'int8').toLowerCase();
+const AI_DTYPE=['q4f16','fp16'].includes(AI_REQUESTED_DTYPE)?'int8':AI_REQUESTED_DTYPE;
 const AI_ENABLED=process.env.CWN_AI_ENABLED!=='0';
 const AI_DEBUG=process.env.CWN_AI_DEBUG==='1';
 const AI_LOAD_TIMEOUT_MS=clamp(Number(process.env.CWN_AI_LOAD_TIMEOUT_MS)||120000,30000,300000);
-const AI_MAX_RSS_MB=clamp(Number(process.env.CWN_AI_MAX_RSS_MB)||330,160,1024);
+const AI_MAX_RSS_MB=clamp(Number(process.env.CWN_AI_MAX_RSS_MB)||320,160,1024);
 let aiState=AI_ENABLED?'STARTING':'DISABLED',aiWorker=null,aiBusy=false,aiReqSeq=0,aiLastError='',aiReadyAt=null;
-let aiWorkerMemoryMB=null,aiWorkerHeapMB=null,aiWorkerStartedAt=null,aiWorkerLoadStartedAt=null,aiLoadProgress=null,aiLoadTimer=null;
+let aiWorkerMemoryMB=null,aiWorkerHeapMB=null,aiWorkerPeakRssMB=null,aiWorkerStartedAt=null,aiWorkerLoadStartedAt=null,aiLoadProgress=null,aiLoadTimer=null;
+let aiSelectedModel=null,aiSelectedDtype=null,aiBootMs=null;const aiAttempts=[];
 const aiPending=new Map();
 const aiQueue=[];
 const aiStats={requests:0,humanRequests:0,botRequests:0,success:0,fallbacks:0,timeouts:0,busyFallbacks:0,workerExits:0,generationMsTotal:0,lastGenerationMs:null,lastRequestAt:null,lastSuccessAt:null};
@@ -98,19 +100,24 @@ function startAIWorker(){
    if(!m||typeof m!=='object')return;
    if(m.type==='state'){
     aiState=m.state||aiState;
+    if(m.model)aiSelectedModel=m.model;if(m.dtype)aiSelectedDtype=m.dtype;if(Number.isFinite(m.bootMs))aiBootMs=m.bootMs;
     if(m.error)aiLastError=String(m.error).slice(0,300);
     if(m.progress)aiLoadProgress=m.progress;
     if(aiState==='READY'){clearTimeout(aiLoadTimer);aiLoadTimer=null;aiReadyAt=new Date().toISOString();traceAI('ready',{pid:aiWorker?.pid,rssMB:aiWorkerMemoryMB})}
     else traceAI('state',{state:aiState,error:m.error||null});
     return;
    }
-   if(m.type==='progress'){
+   if(m.type==='attempt'){aiAttempts.push({at:new Date().toISOString(),index:m.index,model:m.model,dtype:m.dtype,availableDtypes:m.availableDtypes||[]});if(aiAttempts.length>8)aiAttempts.shift();traceAI('attempt',{index:m.index,model:m.model,dtype:m.dtype,availableDtypes:m.availableDtypes||[]});return;}
+    if(m.type==='attempt-failed'){aiAttempts.push({at:new Date().toISOString(),index:m.index,model:m.model,dtype:m.dtype,error:m.error});if(aiAttempts.length>8)aiAttempts.shift();traceAI('attempt-failed',{index:m.index,model:m.model,dtype:m.dtype,error:m.error});return;}
+    if(m.type==='selected'){aiSelectedModel=m.model||aiSelectedModel;aiSelectedDtype=m.dtype||aiSelectedDtype;traceAI('selected',{model:aiSelectedModel,dtype:aiSelectedDtype,attempt:m.attempt});return;}
+    if(m.type==='progress'){
     aiLoadProgress={status:m.status||null,file:m.file||null,progress:Number.isFinite(m.progress)?Math.round(m.progress*10)/10:null,loaded:m.loaded||null,total:m.total||null};
     return;
    }
    if(m.type==='memory'){
     aiWorkerMemoryMB=Number.isFinite(m.rssMB)?m.rssMB:aiWorkerMemoryMB;
     aiWorkerHeapMB=Number.isFinite(m.heapMB)?m.heapMB:aiWorkerHeapMB;
+     aiWorkerPeakRssMB=Number.isFinite(m.peakRssMB)?m.peakRssMB:aiWorkerPeakRssMB;
     return;
    }
    if(m.type==='result'){
@@ -163,9 +170,9 @@ function requestAI(prompt,{timeout=7500,source='human',stage='QSO'}={}){
 function aiDebugSnapshot(full=false){
  const avg=aiStats.success?Math.round(aiStats.generationMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.27',state:aiState,enabled:AI_ENABLED,busy:aiBusy,queue:aiQueue.map(x=>({source:x.source,stage:x.stage})),
-  model:AI_MODEL,dtype:AI_DTYPE,readyAt:aiReadyAt,error:aiLastError||null,
-  worker:{pid:aiWorker?.pid||null,startedAt:aiWorkerStartedAt,loadStartedAt:aiWorkerLoadStartedAt,rssMB:aiWorkerMemoryMB,heapMB:aiWorkerHeapMB,maxRssMB:AI_MAX_RSS_MB,loadTimeoutMs:AI_LOAD_TIMEOUT_MS,progress:aiLoadProgress},
+  ok:true,service:'CW Network AI',version:'0.28',state:aiState,enabled:AI_ENABLED,busy:aiBusy,queue:aiQueue.map(x=>({source:x.source,stage:x.stage})),
+  model:AI_MODEL,dtype:AI_DTYPE,requestedDtype:AI_REQUESTED_DTYPE,selectedModel:aiSelectedModel,selectedDtype:aiSelectedDtype,bootMs:aiBootMs,readyAt:aiReadyAt,error:aiLastError||null,
+  worker:{pid:aiWorker?.pid||null,startedAt:aiWorkerStartedAt,loadStartedAt:aiWorkerLoadStartedAt,rssMB:aiWorkerMemoryMB,heapMB:aiWorkerHeapMB,peakRssMB:aiWorkerPeakRssMB,maxRssMB:AI_MAX_RSS_MB,loadTimeoutMs:AI_LOAD_TIMEOUT_MS,progress:aiLoadProgress,attempts:aiAttempts},
   main:{rssMB:Math.round(process.memoryUsage().rss/1024/1024),heapMB:Math.round(process.memoryUsage().heapUsed/1024/1024),uptime:Math.round(process.uptime())},
   stats:{...aiStats,avgGenerationMs:avg},last:{source:aiLastSource||null,stage:aiLastStage||null,generationMs:aiStats.lastGenerationMs},trace:aiTrace.slice(-20)
  };
@@ -404,10 +411,10 @@ const server=http.createServer((req,res)=>{
  if(req.url==='/'||req.url==='/health'){
   res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
   res.end(JSON.stringify({
-   ok:true,service:'CW Network',version:'0.27',
+   ok:true,service:'CW Network',version:'0.28',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
-   ai:aiState,aiBusy,aiQueue:aiQueue.length,aiReadyAt,aiError:aiLastError||null,model:AI_MODEL,aiDtype:AI_DTYPE,
-   aiPid:aiWorker?.pid||null,aiMemoryMB:aiWorkerMemoryMB,aiLoadProgress,startedAt:SERVER_STARTED_AT,
+   ai:aiState,aiBusy,aiQueue:aiQueue.length,aiReadyAt,aiError:aiLastError||null,model:AI_MODEL,aiDtype:AI_DTYPE,aiRequestedDtype:AI_REQUESTED_DTYPE,aiSelectedModel,aiSelectedDtype,aiBootMs,
+   aiPid:aiWorker?.pid||null,aiMemoryMB:aiWorkerMemoryMB,aiPeakMemoryMB:aiWorkerPeakRssMB,aiLoadProgress,startedAt:SERVER_STARTED_AT,
    memoryMB:Math.round(process.memoryUsage().rss/1024/1024),
    uptime:Math.round(process.uptime()),spaceWeather
   }));return;
@@ -468,4 +475,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.27 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.28 listening on ${PORT}`));
