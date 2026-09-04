@@ -45,9 +45,20 @@
   let stateSendTimer=null, connectedOnce=false;
   const remoteStations=new Map();
   const remoteVoices=new Map();
-  let rxMaster=null, noiseGain=null, noiseSource=null;
-  let meterTimer=null;
+  let rxMaster=null, noiseGain=null, noiseSource=null, noiseBandpass=null;
+  let meterTimer=null, qrnTimer=null, qrnBuffer=null;
   let audioUnlocked=false;
+  const directHeld=new Set();
+  const decoderStates=new Map();
+  const MORSE_DECODE={
+    '.-':'A','-...':'B','-.-.':'C','-..':'D','.':'E','..-.':'F','--.':'G','....':'H','..':'I',
+    '.---':'J','-.-':'K','.-..':'L','--':'M','-.':'N','---':'O','.--.':'P','--.-':'Q','.-.':'R',
+    '...':'S','-':'T','..-':'U','...-':'V','.--':'W','-..-':'X','-.--':'Y','--..':'Z',
+    '-----':'0','.----':'1','..---':'2','...--':'3','....-':'4','.....':'5','-....':'6',
+    '--...':'7','---..':'8','----.':'9','-..-.':'/','..--..':'?'
+  };
+  let decodedText='';
+  let spaceWeather={kp:null,sfi:null,updated:null,source:'NOAA SWPC'};
 
   function syncActivityPanelHeight(){
     const panel=$('.activityPanel');
@@ -222,6 +233,7 @@
     btn.classList.add('active');
     band=nextBand; hz=bands[band].center; redraw();
     $('#bandActivity').textContent=band+'M · …';
+    updateNoiseLevel(); scheduleQrn(); resetDecoder();
     bandsUsed.add(band);
     $('#bandsUsedStat').textContent=bandsUsed.size;
     updateServiceUI();
@@ -240,11 +252,12 @@
     toggle($('#decode'));
     const on=$('#decode').classList.contains('active');
     $('#mainDecode').classList.toggle('hidden',!on);
-    $('#decodeTicker').textContent=on?'DATA · Listening for readable CW on tuned frequency…':'';
+    if(on){ resetDecoder(); $('#decodeTicker').textContent='DATA · Listening…'; } else resetDecoder();
   };
   $('#reverse').onclick=()=>{
+    if(keyMode!=='PADDLE') return;
     $('#reverse').classList.toggle('active');
-    $('#reverse').textContent=$('#reverse').classList.contains('active')?'REVERSED':'NORMAL';
+    $('#reverse').textContent=$('#reverse').classList.contains('active')?'REV · ON':'REV · NORMAL';
   };
   $('#iambicMode').onclick=()=>{
     if(keyMode!=='PADDLE') return;
@@ -260,7 +273,7 @@
     toggle($('#wf'));
     $('#waterfall').style.display=$('#wf').classList.contains('active')?'block':'none';
   };
-  $('#filter').onchange=()=>{ $('#filterText').textContent=$('#filter').value+' Hz'; refreshRemoteVoices(); };
+  $('#filter').onchange=()=>{ $('#filterText').textContent=$('#filter').value+' Hz'; refreshRemoteVoices(); updateNoiseLevel(); };
   function syncBreakIn(){
     const qsk=$('#breakin').value==='QSK';
     const off=$('#breakin').value==='OFF';
@@ -286,6 +299,7 @@
     $('#toneRead').textContent=$('#tone').value+' Hz';
     if(osc) osc.frequency.value=+$('#tone').value;
     refreshRemoteVoices();
+    updateNoiseLevel();
   };
   $('#sideVol').oninput=()=>{
     $('#sideVolText').textContent=$('#sideVol').value==='0'?'OFF':$('#sideVol').value+'%';
@@ -304,8 +318,9 @@
     const paddleOn=keyMode==='PADDLE';
     $('#iambicMode').disabled=!paddleOn;
     $('#iambicMode').classList.toggle('disabledCtl',!paddleOn);
+    $('#reverse').disabled=!paddleOn;
     $('#keybar').textContent=keyMode==='STRAIGHT'
-      ? 'SPACE / MOUSE · KEY'
+      ? 'SPACE / CTRL / [ ] / MOUSE · KEY'
       : (iambicMode==='BUG' ? 'PADDLE · BUG' : 'PADDLE · IAMBIC '+iambicMode);
 
     log('Key input: '+keyMode+'.');
@@ -393,22 +408,62 @@
     const length=audioCtx.sampleRate*2;
     const buf=audioCtx.createBuffer(1,length,audioCtx.sampleRate);
     const data=buf.getChannelData(0);
-    for(let i=0;i<length;i++) data[i]=(Math.random()*2-1)*0.45;
+    for(let i=0;i<length;i++) data[i]=(Math.random()*2-1)*0.58;
     noiseSource=audioCtx.createBufferSource(); noiseSource.buffer=buf; noiseSource.loop=true;
-    const hp=audioCtx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=250;
-    const lp=audioCtx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=1700;
+    noiseBandpass=audioCtx.createBiquadFilter(); noiseBandpass.type='bandpass';
     noiseGain=audioCtx.createGain();
-    noiseSource.connect(hp); hp.connect(lp); lp.connect(noiseGain); noiseGain.connect(rxMaster); noiseSource.start();
+    noiseSource.connect(noiseBandpass); noiseBandpass.connect(noiseGain); noiseGain.connect(rxMaster); noiseSource.start();
+
+    const qlen=Math.max(256,Math.floor(audioCtx.sampleRate*.08));
+    qrnBuffer=audioCtx.createBuffer(1,qlen,audioCtx.sampleRate);
+    const qd=qrnBuffer.getChannelData(0);
+    for(let i=0;i<qlen;i++){
+      const env=Math.exp(-i/(audioCtx.sampleRate*.012));
+      qd[i]=(Math.random()*2-1)*env;
+    }
     updateNoiseLevel();
+    scheduleQrn();
+  }
+
+  function filterCaptureHz(){
+    const bw=+$('#filter').value;
+    return ({600:300,1800:450,2500:500}[bw]||Math.min(500,Math.max(120,bw/2)));
   }
 
   function updateNoiseLevel(){
-    if(!noiseGain) return;
-    const base={80:.055,40:.04,20:.03,15:.025,10:.022}[band]||.03;
-    const nr=$('#nr').classList.contains('active')?.55:1;
-    const nb=$('#nb').classList.contains('active')?.88:1;
-    noiseGain.gain.setTargetAtTime(base*nr*nb,audioCtx.currentTime,.05);
+    if(!noiseGain || !audioCtx) return;
+    const bw=+$('#filter').value;
+    const widthFactor={600:.58,1800:.88,2500:1}[bw]||1;
+    const base={80:.105,40:.085,20:.062,15:.052,10:.046}[band]||.06;
+    const nr=$('#nr').classList.contains('active')?.46:1;
+    noiseGain.gain.setTargetAtTime(base*widthFactor*nr,audioCtx.currentTime,.08);
+    if(noiseBandpass){
+      const tone=+$('#tone').value;
+      noiseBandpass.frequency.setTargetAtTime(tone,audioCtx.currentTime,.05);
+      noiseBandpass.Q.setTargetAtTime(Math.max(.35,tone/Math.max(300,bw)),audioCtx.currentTime,.05);
+    }
     rxMaster.gain.setTargetAtTime((+$('#afVol').value/100),audioCtx.currentTime,.04);
+  }
+
+  function scheduleQrn(){
+    clearTimeout(qrnTimer);
+    if(!audioCtx) return;
+    const bandRate={80:1.0,40:.82,20:.55,15:.40,10:.32}[band]||.5;
+    const kp=Number.isFinite(spaceWeather.kp)?spaceWeather.kp:2;
+    const delay=(1500+Math.random()*5200)/Math.max(.45,bandRate*(1+kp*.05));
+    qrnTimer=setTimeout(()=>{
+      if(audioCtx && qrnBuffer){
+        const src=audioCtx.createBufferSource(); src.buffer=qrnBuffer;
+        const bp=audioCtx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=+$('#tone').value; bp.Q.value=.7;
+        const g=audioCtx.createGain();
+        const nb=$('#nb').classList.contains('active');
+        const nr=$('#nr').classList.contains('active');
+        const amp=(.11+Math.random()*.13)*(nb?.16:1)*(nr?.72:1);
+        g.gain.value=amp;
+        src.connect(bp); bp.connect(g); g.connect(rxMaster); src.start();
+      }
+      scheduleQrn();
+    },delay);
   }
 
   function ramp(to,ms=5){
@@ -435,7 +490,7 @@
     wfKeyUp('LOCAL');
     $('#txFlag').textContent='RX'; $('#txFlag').classList.remove('tx');
     $('#keybar').classList.remove('down');
-    $('#keybar').textContent=keyMode==='STRAIGHT'?'SPACE / MOUSE · KEY':(iambicMode==='BUG'?'PADDLE · BUG':'PADDLE · IAMBIC '+iambicMode);
+    $('#keybar').textContent=keyMode==='STRAIGHT'?'SPACE / CTRL / [ ] / MOUSE · KEY':(iambicMode==='BUG'?'PADDLE · BUG':'PADDLE · IAMBIC '+iambicMode);
     updateSmeter();
     ramp(0,5);
     sendNet({type:'key_up', band, hz, seq:++netSeq, t:Date.now()});
@@ -547,22 +602,33 @@
     step();
   }
 
+  function isEditing(){
+    return document.activeElement && ['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement.tagName);
+  }
+  function directPress(token){
+    if(directHeld.has(token)) return;
+    directHeld.add(token);
+    keyDown();
+  }
+  function directRelease(token){
+    directHeld.delete(token);
+    if(directHeld.size===0) keyUp();
+  }
+
   window.addEventListener('keydown',e=>{
-    if(e.code!=='Space') return;
-    const editing=document.activeElement && ['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement.tagName);
-    if(!editing) e.preventDefault();
+    if(e.code==='Space' && !isEditing()) e.preventDefault();
   },{capture:true,passive:false});
 
   document.addEventListener('keydown',e=>{
     if(e.repeat) return;
 
     if(e.code==='Space'){
-      const editing=document.activeElement && ['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement.tagName);
-      if(!editing){
-        e.preventDefault();
-        e.stopPropagation();
-        if(keyMode==='STRAIGHT') keyDown();
-      }
+      if(!isEditing()){ e.preventDefault(); e.stopPropagation(); directPress(e.code); }
+      return;
+    }
+
+    if((isDitCode(e)||isDahCode(e)) && keyMode==='STRAIGHT'){
+      if(!isEditing()){ e.preventDefault(); directPress(e.code); }
       return;
     }
 
@@ -573,11 +639,7 @@
       if(keyMode==='PADDLE'){
         if(iambicMode==='BUG'){
           if(ditInput==='dit') runBugDits();
-          else {
-            manualDahDown=true;
-            cancelKeyer();
-            if(!tx) keyDown();
-          }
+          else { manualDahDown=true; cancelKeyer(); if(!tx) keyDown(); }
         } else runKeyer();
       }
       return;
@@ -590,11 +652,7 @@
       if(keyMode==='PADDLE'){
         if(iambicMode==='BUG'){
           if(dahInput==='dit') runBugDits();
-          else {
-            manualDahDown=true;
-            cancelKeyer();
-            if(!tx) keyDown();
-          }
+          else { manualDahDown=true; cancelKeyer(); if(!tx) keyDown(); }
         } else runKeyer();
       }
     }
@@ -602,12 +660,12 @@
 
   document.addEventListener('keyup',e=>{
     if(e.code==='Space'){
-      const editing=document.activeElement && ['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement.tagName);
-      if(!editing){
-        e.preventDefault();
-        e.stopPropagation();
-        if(keyMode==='STRAIGHT') keyUp();
-      }
+      if(!isEditing()){ e.preventDefault(); e.stopPropagation(); directRelease(e.code); }
+      return;
+    }
+
+    if((isDitCode(e)||isDahCode(e)) && keyMode==='STRAIGHT'){
+      if(!isEditing()){ e.preventDefault(); directRelease(e.code); }
       return;
     }
 
@@ -640,10 +698,10 @@
   $('#keybar').addEventListener('pointerdown',e=>{
     e.preventDefault();
     $('#keybar').setPointerCapture(e.pointerId);
-    keyDown();
+    directPress('POINTER_'+e.pointerId);
   });
-  $('#keybar').addEventListener('pointerup',keyUp);
-  $('#keybar').addEventListener('pointercancel',keyUp);
+  $('#keybar').addEventListener('pointerup',e=>directRelease('POINTER_'+e.pointerId));
+  $('#keybar').addEventListener('pointercancel',e=>directRelease('POINTER_'+e.pointerId));
 
 
   // -------- Realtime-ready waterfall event model --------
@@ -794,7 +852,10 @@
       return;
     }
     if(m.type==='snapshot'){
-      (m.stations||[]).forEach(s=>remoteStations.set(s.stationId,s));
+      (m.stations||[]).forEach(s=>{
+        remoteStations.set(s.stationId,s);
+        if(s.keyDown && s.stationId!==stationId) remoteKeyDown(s);
+      });
       return;
     }
     if(m.type==='station_state' && m.stationId!==stationId){ remoteStations.set(m.stationId,m); return; }
@@ -804,41 +865,157 @@
     if(m.type==='activity' && m.message) { log(m.message); return; }
     if(m.type==='key_down' && m.stationId!==stationId){ remoteKeyDown(m); return; }
     if(m.type==='key_up' && m.stationId!==stationId){ remoteKeyUp(m.stationId); return; }
-    if(m.type==='service_text' && $('#decode').classList.contains('active') && m.band===band){
-      if(Math.abs(hz-m.hz)<=Math.max(250,+$('#filter').value/2)) $('#decodeTicker').textContent='DATA · '+m.text;
+    if(m.type==='space_weather'){
+      const kp=(m.kp===null||m.kp===undefined)?NaN:Number(m.kp), sfi=(m.sfi===null||m.sfi===undefined)?NaN:Number(m.sfi);
+      spaceWeather={...spaceWeather,...m,kp:Number.isFinite(kp)?kp:null,sfi:Number.isFinite(sfi)?sfi:null};
+      $('#prop').textContent=(spaceWeather.kp==null&&spaceWeather.sfi==null)
+        ?'NOAA · UNAVAILABLE'
+        :`Kp ${spaceWeather.kp?.toFixed(1)??'–'} · SFI ${spaceWeather.sfi??'–'}`;
+      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn();
+      return;
     }
+    if(m.type==='service_text') return;
   }
 
-  function bearingApprox(locator){
-    if(!locator || locator.length<4) return null;
-    // Deterministic fallback bearing for the virtual RF engine until full Maidenhead geodesy is added.
-    let h=0; for(const c of locator) h=(h*31+c.charCodeAt(0))>>>0; return h%360;
+  function maidenheadToLatLon(locator){
+    const s=String(locator||'').trim().toUpperCase();
+    if(!/^[A-R]{2}[0-9]{2}([A-X]{2})?([0-9]{2})?$/.test(s)) return null;
+    let lon=-180+(s.charCodeAt(0)-65)*20;
+    let lat=-90 +(s.charCodeAt(1)-65)*10;
+    let lonSize=20, latSize=10;
+    lon+=Number(s[2])*2; lat+=Number(s[3]); lonSize=2; latSize=1;
+    if(s.length>=6){
+      lon+=(s.charCodeAt(4)-65)/12; lat+=(s.charCodeAt(5)-65)/24;
+      lonSize=1/12; latSize=1/24;
+    }
+    if(s.length>=8){
+      lon+=Number(s[6])/120; lat+=Number(s[7])/240;
+      lonSize=1/120; latSize=1/240;
+    }
+    return {lat:lat+latSize/2,lon:lon+lonSize/2};
+  }
+  function bearingDistanceTo(remoteLocator){
+    const a=maidenheadToLatLon($('#locator').value), b=maidenheadToLatLon(remoteLocator);
+    if(!a||!b) return null;
+    const r=Math.PI/180, p1=a.lat*r, p2=b.lat*r, dl=(b.lon-a.lon)*r;
+    const y=Math.sin(dl)*Math.cos(p2);
+    const x=Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+    const bearing=(Math.atan2(y,x)/r+360)%360;
+    const dlat=(b.lat-a.lat)*r;
+    const h=Math.sin(dlat/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+    const distance=6371*2*Math.atan2(Math.sqrt(h),Math.sqrt(Math.max(0,1-h)));
+    return {bearing,distance};
   }
   function antennaFactor(st){
-    if(antenna!==1 || !$('#locator').value || !st.locator) return 1;
-    const br=bearingApprox(st.locator); if(br==null) return 1;
-    const d=Math.abs(shortestDelta(rotorActual,br));
-    if(d<=35) return 1.6;
-    if(d<=75) return 1.05;
-    if(d<=120) return .65;
-    return .42;
+    if(antenna!==1) return 1;
+    const geo=bearingDistanceTo(st.locator);
+    if(!geo) return 1;
+    const d=Math.abs(shortestDelta(rotorActual,geo.bearing));
+    if(d<=30) return 1.65;
+    if(d<=60) return 1.15;
+    if(d<=100) return .72;
+    if(d<=140) return .50;
+    return .38;
+  }
+  function propagationFactor(st){
+    const kp=Number.isFinite(spaceWeather.kp)?spaceWeather.kp:2;
+    const sfi=Number.isFinite(spaceWeather.sfi)?spaceWeather.sfi:120;
+    let f=1;
+    if(kp>3) f*=Math.max(.72,1-(kp-3)*.055);
+    if(band===10) f*=Math.max(.82,Math.min(1.15,.88+(sfi-90)/320));
+    else if(band===15) f*=Math.max(.86,Math.min(1.12,.92+(sfi-90)/420));
+    else if(band===20) f*=Math.max(.90,Math.min(1.08,.96+(sfi-90)/600));
+    const geo=bearingDistanceTo(st.locator);
+    if(geo){
+      const d=geo.distance;
+      if(d<80) f*=.92;
+      else if(d<400) f*=.98;
+      else if(d<3500) f*=1.04;
+      else if(d>9000) f*=.90;
+    }
+    return f;
   }
   function signalLevel(st){
     const p=Math.max(1,st.power||10);
     const powerDb=10*Math.log10(p/10);
-    const bandBase={80:.22,40:.25,20:.24,15:.22,10:.20}[band]||.22;
-    const seed=((st.stationId||'x').split('').reduce((a,c)=>a+c.charCodeAt(0),0)%17)/100;
-    return Math.max(.025,Math.min(.72,(bandBase+seed+powerDb/100)*antennaFactor(st)));
+    const bandBase={80:.25,40:.28,20:.27,15:.25,10:.23}[band]||.25;
+    const seed=((st.stationId||'x').split('').reduce((a,c)=>a+c.charCodeAt(0),0)%17)/110;
+    return Math.max(.02,Math.min(.78,(bandBase+seed+powerDb/95)*antennaFactor(st)*propagationFactor(st)));
   }
   function receiveGainFor(st){
     if(st.band!==band) return 0;
     const df=Math.abs((st.hz||0)-hz);
-    const bw=+$('#filter').value;
-    const edge=bw/2;
-    if(df>edge*1.35) return 0;
-    const pass=df<=edge?1:Math.max(0,1-(df-edge)/(edge*.35));
-    return signalLevel(st)*pass*(+$('#afVol').value/100);
+    const capture=filterCaptureHz();
+    if(df>=capture) return 0;
+    const flat=capture*.72;
+    let pass=1;
+    if(df>flat){
+      const x=(df-flat)/(capture-flat);
+      pass=.5*(1+Math.cos(Math.PI*x));
+    }
+    return signalLevel(st)*pass;
   }
+  function qsbFactor(v){
+    const t=performance.now()/1000;
+    return .72+.28*(.5+.5*Math.sin(t*(v.qsbRate||.10)*Math.PI*2+(v.qsbPhase||0)));
+  }
+
+  function resetDecoder(){
+    for(const d of decoderStates.values()){ clearTimeout(d.charTimer); clearTimeout(d.wordTimer); }
+    decoderStates.clear(); decodedText='';
+    if($('#decode').classList.contains('active')) $('#decodeTicker').textContent='DATA · Listening…';
+  }
+  function updateDecodeTicker(){
+    if(!$('#decode').classList.contains('active')) return;
+    $('#decodeTicker').textContent='DATA · '+(decodedText||'Listening…').slice(-110);
+  }
+  function decoderState(id,st){
+    let d=decoderStates.get(id);
+    if(!d){
+      d={marks:'',downAt:0,lastUp:0,charTimer:null,wordTimer:null,unit:1200/Math.max(5,st.wpm||15),corrupt:false};
+      decoderStates.set(id,d);
+    }
+    d.unit=1200/Math.max(5,st.wpm||15);
+    return d;
+  }
+  function decoderKeyDown(st){
+    if(!$('#decode').classList.contains('active') || receiveGainFor(st)<.018) return;
+    const d=decoderState(st.stationId,st);
+    clearTimeout(d.charTimer); clearTimeout(d.wordTimer);
+    const now=performance.now();
+    if(d.lastUp && now-d.lastUp>=d.unit*5.2 && decodedText && !decodedText.endsWith(' ')) decodedText+=' ';
+    d.downAt=now;
+    let simultaneous=0;
+    for(const [id,v] of remoteVoices){
+      if(id!==st.stationId && v.down){
+        const other=remoteStations.get(id);
+        if(other && receiveGainFor(other)>.025) simultaneous++;
+      }
+    }
+    d.corrupt=simultaneous>0;
+    updateDecodeTicker();
+  }
+  function commitDecoderChar(id){
+    const d=decoderStates.get(id); if(!d||!d.marks) return;
+    decodedText+=d.corrupt?'?':(MORSE_DECODE[d.marks]||'?');
+    d.marks=''; d.corrupt=false; updateDecodeTicker();
+  }
+  function decoderKeyUp(st){
+    if(!$('#decode').classList.contains('active')) return;
+    const d=decoderStates.get(st.stationId); if(!d||!d.downAt) return;
+    const now=performance.now(), dur=now-d.downAt;
+    d.downAt=0; d.lastUp=now;
+    if(dur<d.unit*.35 || dur>d.unit*5.5) d.corrupt=true;
+    d.marks+=dur<d.unit*2?'.':'-';
+    clearTimeout(d.charTimer); clearTimeout(d.wordTimer);
+    d.charTimer=setTimeout(()=>commitDecoderChar(st.stationId),d.unit*2.15);
+    d.wordTimer=setTimeout(()=>{
+      commitDecoderChar(st.stationId);
+      if(decodedText && !decodedText.endsWith(' ')) decodedText+=' ';
+      updateDecodeTicker();
+    },d.unit*6.2);
+  }
+
   function remoteKeyDown(m){
     ensureAudio();
     const st={...(remoteStations.get(m.stationId)||{}),...m}; remoteStations.set(m.stationId,st);
@@ -848,19 +1025,20 @@
     if(!v){
       const o=audioCtx.createOscillator(); o.type='sine';
       const g=audioCtx.createGain(); g.gain.value=0; o.connect(g); g.connect(rxMaster); o.start();
-      v={osc:o,gain:g,down:false,qsb:0}; remoteVoices.set(m.stationId,v);
+      v={osc:o,gain:g,down:false,qsbRate:.055+Math.random()*.075,qsbPhase:Math.random()*Math.PI*2}; remoteVoices.set(m.stationId,v);
     }
-    v.down=true; v.qsb=.86+Math.random()*.22;
+    v.down=true; decoderKeyDown(st);
     const offset=(m.hz||st.hz||hz)-hz;
     const f=Math.max(160,Math.min(1800,+$('#tone').value+offset));
     v.osc.frequency.setTargetAtTime(f,audioCtx.currentTime,.005);
-    const amp=receiveGainFor(st)*v.qsb;
+    const amp=receiveGainFor(st)*qsbFactor(v);
     v.gain.gain.cancelScheduledValues(audioCtx.currentTime);
     v.gain.gain.setTargetAtTime(amp,audioCtx.currentTime,.004);
     updateSmeter();
   }
   function remoteKeyUp(id){
     wfKeyUp(id);
+    const st=remoteStations.get(id); if(st) decoderKeyUp(st);
     const v=remoteVoices.get(id); if(!v||!audioCtx) return;
     v.down=false; v.gain.gain.cancelScheduledValues(audioCtx.currentTime); v.gain.gain.setTargetAtTime(0,audioCtx.currentTime,.006);
     updateSmeter();
@@ -871,22 +1049,24 @@
       const st=remoteStations.get(id); if(!st||!v.down) continue;
       const offset=(st.hz||hz)-hz;
       v.osc.frequency.setTargetAtTime(Math.max(160,Math.min(1800,+$('#tone').value+offset)),audioCtx.currentTime,.006);
-      v.gain.gain.setTargetAtTime(receiveGainFor(st)*(v.qsb||1),audioCtx.currentTime,.02);
+      v.gain.gain.setTargetAtTime(receiveGainFor(st)*qsbFactor(v),audioCtx.currentTime,.04);
     }
   }
   function updateSmeter(){
     let strongest=0;
     for(const [id,v] of remoteVoices){ if(!v.down) continue; const st=remoteStations.get(id); if(st) strongest=Math.max(strongest,receiveGainFor(st)); }
-    const noise={80:.10,40:.075,20:.055,15:.045,10:.04}[band]||.05;
+    const bw=+$('#filter').value;
+    const nr=$('#nr').classList.contains('active')?.55:1;
+    const noise=({80:.12,40:.095,20:.07,15:.058,10:.05}[band]||.065)*({600:.58,1800:.88,2500:1}[bw]||1)*nr;
     const level=Math.min(1,noise+strongest);
     $('#sfill').style.width=(4+level*92)+'%';
     const s=Math.max(1,Math.min(9,Math.round(level*10)));
     $('#sigText').textContent=strongest>.02?'S'+s:'S'+Math.max(1,Math.round(noise*10));
   }
-  function startMeter(){ if(meterTimer) return; meterTimer=setInterval(updateSmeter,140); }
+  function startMeter(){ if(meterTimer) return; meterTimer=setInterval(()=>{refreshRemoteVoices();updateSmeter();},120); }
 
   $('#callsign').addEventListener('change',()=>scheduleStateSend(true));
-  $('#locator').addEventListener('change',()=>scheduleStateSend(true));
+  $('#locator').addEventListener('change',()=>{scheduleStateSend(true);refreshRemoteVoices();});
   window.addEventListener('beforeunload',()=>{ try{sendNet({type:'leave'});}catch(_){} });
 
   // -------- Lightweight local usage telemetry placeholders --------

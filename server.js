@@ -13,7 +13,7 @@ const SERVICE_FREQ = {80:3551500,40:7031500,20:14026500,15:21026500,10:28021500}
 const server=http.createServer((req,res)=>{
   if(req.url==='/health' || req.url==='/'){
     res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
-    res.end(JSON.stringify({ok:true,service:'CW Network',clients:clients.size,uptime:Math.round(process.uptime())}));
+    res.end(JSON.stringify({ok:true,service:'CW Network',clients:clients.size,uptime:Math.round(process.uptime()),spaceWeather}));
     return;
   }
   res.writeHead(404); res.end('Not found');
@@ -22,6 +22,7 @@ const wss=new WebSocketServer({server,maxPayload:16*1024});
 const clients=new Map();
 const recentBandTx=new Map([...VALID_BANDS].map(b=>[b,[]]));
 let serverSeq=0;
+let spaceWeather={type:'space_weather',kp:null,sfi:null,updated:null,source:'NOAA SWPC'};
 
 function id(prefix='st'){ return prefix+'_'+crypto.randomBytes(6).toString('hex'); }
 function clamp(n,a,b){ return Math.max(a,Math.min(b,n)); }
@@ -61,7 +62,7 @@ function presence(){
   broadcast(msg);
 }
 function snapshotFor(ws){
-  const stations=[...clients.values()].map(publicState).concat([...bots.values()].map(publicState));
+  const stations=[...clients.values()].map(publicState).concat([...bots.values()].map(publicState),[...services.values()].map(publicState));
   send(ws,{type:'snapshot',stations});
 }
 
@@ -70,7 +71,7 @@ wss.on('connection',(ws,req)=>{
   const state={stationId,kind:'human',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),lastMsgAt:0,keyDown:false};
   clients.set(ws,state);
   ws.isAlive=true;
-  send(ws,{type:'welcome',stationId,serverTime:Date.now()}); snapshotFor(ws); presence();
+  send(ws,{type:'welcome',stationId,serverTime:Date.now()}); send(ws,spaceWeather); snapshotFor(ws); presence();
 
   ws.on('pong',()=>{ws.isAlive=true; state.lastSeen=Date.now();});
   ws.on('message',buf=>{
@@ -131,8 +132,8 @@ function transmitVirtual(st,text,{service=false}={}){
   const {events,duration}=morseTimeline(text,st.wpm);
   const kind=service?'service':'human';
   events.forEach(ev=>setTimeout(()=>{
-    if(ev.down){ recordTx(st.band); broadcast({type:'key_down',stationId:st.stationId,kind,band:st.band,hz:st.hz,power:st.power,callsign:st.callsign,locator:st.locator,seq:++serverSeq,t:Date.now()}); }
-    else broadcast({type:'key_up',stationId:st.stationId,seq:++serverSeq,t:Date.now()});
+    if(ev.down){ st.keyDown=true; recordTx(st.band); broadcast({type:'key_down',stationId:st.stationId,kind,band:st.band,hz:st.hz,power:st.power,callsign:st.callsign,locator:st.locator,seq:++serverSeq,t:Date.now()}); }
+    else { st.keyDown=false; broadcast({type:'key_up',stationId:st.stationId,seq:++serverSeq,t:Date.now()}); }
   },ev.at));
   if(service) broadcast({type:'service_text',band:st.band,hz:st.hz,text});
   setTimeout(()=>{st.busy=false;},duration+100);
@@ -141,12 +142,12 @@ function transmitVirtual(st,text,{service=false}={}){
 
 const bots=new Map();
 const botSpecs=[
-  ['CN1A',80,3554200,13,'STRAIGHT'],['CWN7A',40,7036200,16,'BUG'],['CWN2A',20,14029200,22,'PADDLE'],['CWN5A',15,21031400,20,'PADDLE'],['CWN0A',10,28024600,24,'PADDLE']
+  ['CN1A',80,3554200,13,'STRAIGHT','IM63'],['CWN7A',40,7036200,16,'BUG','GF05'],['CWN2A',20,14029200,22,'PADDLE','FN31'],['CWN5A',15,21031400,20,'PADDLE','JN18'],['CWN0A',10,28024600,24,'PADDLE','PM95']
 ];
-for(const [call,band,hz,wpm,keyMode] of botSpecs){
-  const st={stationId:id('v'),kind:'virtual',callsign:call,locator:'',band,hz,power:25,antenna:2,azimuth:0,wpm,keyMode,iambicMode:'A',busy:false}; bots.set(st.stationId,st);
+for(const [call,band,hz,wpm,keyMode,locator] of botSpecs){
+  const st={stationId:id('v'),kind:'virtual',callsign:call,locator,band,hz,power:25,antenna:2,azimuth:0,wpm,keyMode,iambicMode:'A',busy:false,keyDown:false}; bots.set(st.stationId,st);
 }
-const services=new Map([...VALID_BANDS].map(b=>[b,{stationId:`svc_${b}`,kind:'service',callsign:'CWN',locator:'',band:b,hz:SERVICE_FREQ[b],power:40,antenna:2,azimuth:0,wpm:18,keyMode:'PADDLE',iambicMode:'A',busy:false}]));
+const services=new Map([...VALID_BANDS].map(b=>[b,{stationId:`svc_${b}`,kind:'service',callsign:'CWN',locator:'',band:b,hz:SERVICE_FREQ[b],power:40,antenna:2,azimuth:0,wpm:18,keyMode:'PADDLE',iambicMode:'A',busy:false,keyDown:false}]));
 
 function humansOnBand(b){ return [...clients.values()].filter(s=>s.band===b).length; }
 function bandOccupiedNear(b,hz,span=180){
@@ -172,6 +173,27 @@ function serviceCycle(){
   }
 }
 setTimeout(serviceCycle,5000); setInterval(serviceCycle,60000);
+
+async function refreshSpaceWeather(){
+  try{
+    const [kpRes,sfiRes]=await Promise.all([
+      fetch('https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json',{headers:{'user-agent':'CW-Network/0.22'}}),
+      fetch('https://services.swpc.noaa.gov/products/summary/10cm-flux.json',{headers:{'user-agent':'CW-Network/0.22'}})
+    ]);
+    if(!kpRes.ok || !sfiRes.ok) throw new Error('NOAA HTTP');
+    const kpData=await kpRes.json(), sfiData=await sfiRes.json();
+    const kpRow=Array.isArray(kpData)&&kpData.length?kpData[kpData.length-1]:null;
+    const sfiRow=Array.isArray(sfiData)&&sfiData.length?sfiData[sfiData.length-1]:null;
+    const kp=Number(kpRow?.Kp), sfi=Number(sfiRow?.flux);
+    spaceWeather={type:'space_weather',kp:Number.isFinite(kp)?kp:null,sfi:Number.isFinite(sfi)?sfi:null,
+      updated:new Date().toISOString(),source:'NOAA SWPC'};
+    broadcast(spaceWeather);
+  }catch(err){
+    console.error('space weather:',err.message);
+  }
+}
+refreshSpaceWeather();
+setInterval(refreshSpaceWeather,15*60*1000);
 
 setInterval(presence,5000);
 setInterval(()=>{
