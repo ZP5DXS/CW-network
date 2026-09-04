@@ -62,6 +62,10 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 .ctrl button,.ctrl select{width:100%;border:1px solid #35414b;background:#161d23;color:var(--text);border-radius:9px;padding:8px;cursor:pointer}
 .ctrl button.active{background:#1d4d32;color:#aef7c8;border-color:#39784f}
 .ctrl input[type=range]{width:100%}
+.keyerConfigCtrl{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:stretch}
+.keyerConfigCtrl .subctrl{min-width:0}
+.keyerConfigCtrl .subctrl label{margin-bottom:5px}
+.keyerConfigCtrl .subctrl button{height:38px}
 .row2{display:grid;grid-template-columns:1.1fr .9fr;gap:12px}
 .dialwrap{display:grid;grid-template-columns:160px 1fr;gap:14px;align-items:center}
 .dial{width:150px;height:150px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#3b444b,#161b20 58%,#090b0d 60%);border:4px solid #252d33;box-shadow:inset 0 0 18px rgba(0,0,0,.7),0 8px 20px rgba(0,0,0,.35);position:relative;cursor:grab;user-select:none;touch-action:none;overscroll-behavior:none}
@@ -86,7 +90,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 .callbox input{width:100%;padding:9px;border:1px solid var(--line);border-radius:9px;background:#0c1115;color:var(--text)}
 .footer{margin-top:12px;text-align:center;color:var(--muted);font-size:12px}
 @media(max-width:980px){.radio{grid-template-columns:1fr}.controls{grid-template-columns:repeat(3,1fr)}.statusbar{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:650px){.display,.row2,.dialwrap,.rotor{grid-template-columns:1fr}.controls{grid-template-columns:repeat(2,1fr)}.dial,.compass{margin:auto}.statusbar{grid-template-columns:1fr 1fr}.callbox{grid-template-columns:1fr}}
+@media(max-width:650px){.display,.row2,.dialwrap,.rotor{grid-template-columns:1fr}.controls{grid-template-columns:repeat(2,1fr)}.keyerConfigCtrl{grid-column:1/-1}.dial,.compass{margin:auto}.statusbar{grid-template-columns:1fr 1fr}.callbox{grid-template-columns:1fr}}
 
 .servicebadge{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid #355043;border-radius:8px;background:#102018;color:#9fe5b8;font-size:11px}
 .servicebadge .dot{width:7px;height:7px;border-radius:50%;background:#6fe19b;box-shadow:0 0 8px #6fe19b}
@@ -265,8 +269,10 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
         <div class="ctrl"><label>Tone</label><input id="tone" type="range" min="350" max="900" step="10" value="650"><div id="toneCtlText">650 Hz</div></div>
         <div class="ctrl"><label>Sidetone</label><input id="sideVol" type="range" min="0" max="100" value="45"><div id="sideVolText">45%</div></div>
         <div class="ctrl"><label>AF / RX volume</label><input id="afVol" type="range" min="0" max="100" value="55"><div id="afVolText">55%</div></div>
-        <div class="ctrl"><label>Keyer mode</label><button id="iambicMode" disabled>A</button></div>
-        <div class="ctrl"><label>Paddle</label><button id="reverse">NORMAL</button></div>
+        <div class="ctrl keyerConfigCtrl">
+          <div class="subctrl"><label>Keyer mode</label><button id="iambicMode" disabled>A</button></div>
+          <div class="subctrl"><label>Paddle reverse</label><button id="reverse">NORMAL</button></div>
+        </div>
         <div class="ctrl decodeCtrl">
           <label>DATA decode</label>
           <div class="decodeInline">
@@ -339,7 +345,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 
   <footer class="footer footerStats">
     <div class="footerBrand">
-      <div class="footerTitle">CW NETWORK RADIO <span>· v0.20</span></div>
+      <div class="footerTitle">CW NETWORK RADIO <span>· v0.21</span></div>
       <div class="footerTag">Free · No ads · Open web · Worldwide CW</div>
       <div class="flagMarquee" aria-label="Worldwide CW">
         <div class="flagTrack">
@@ -358,6 +364,6 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
   </footer>
 </div>
 
-<script src="radio.js" defer></script>
+<script src="radio.js?v=021" defer></script>
 </body>
 </html>

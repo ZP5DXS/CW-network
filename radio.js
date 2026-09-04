@@ -47,6 +47,7 @@
   const remoteVoices=new Map();
   let rxMaster=null, noiseGain=null, noiseSource=null;
   let meterTimer=null;
+  let audioUnlocked=false;
 
   function syncActivityPanelHeight(){
     const panel=$('.activityPanel');
@@ -358,17 +359,35 @@
 
   function ensureAudio(){
     if(!audioCtx){
-      audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC) return false;
+      audioCtx=new AC();
       gain=audioCtx.createGain(); gain.gain.value=0;
       rxMaster=audioCtx.createGain(); rxMaster.gain.value=0.55;
       gain.connect(audioCtx.destination);
       rxMaster.connect(audioCtx.destination);
-      osc=audioCtx.createOscillator(); osc.type='sine'; osc.frequency.value=+$('#tone').value; osc.connect(gain); osc.start();
+      osc=audioCtx.createOscillator();
+      osc.type='sine';
+      osc.frequency.value=+$('#tone').value;
+      osc.connect(gain);
+      osc.start();
       createNoise();
       startMeter();
     }
-    if(audioCtx.state==='suspended') audioCtx.resume();
+    if(audioCtx.state==='suspended'){
+      audioCtx.resume().then(()=>{ audioUnlocked=true; }).catch(()=>{});
+    } else {
+      audioUnlocked=true;
+    }
+    return true;
   }
+
+  function unlockAudio(){
+    ensureAudio();
+    if(audioCtx && audioCtx.state==='suspended') audioCtx.resume().catch(()=>{});
+  }
+  window.addEventListener('pointerdown',unlockAudio,{once:true,capture:true});
+  window.addEventListener('keydown',unlockAudio,{once:true,capture:true});
 
   function createNoise(){
     const length=audioCtx.sampleRate*2;
@@ -393,7 +412,7 @@
   }
 
   function ramp(to,ms=5){
-    ensureAudio();
+    if(!ensureAudio() || !audioCtx || !gain) return;
     const t=audioCtx.currentTime;
     gain.gain.cancelScheduledValues(t);
     gain.gain.setValueAtTime(gain.gain.value,t);
@@ -634,23 +653,30 @@
   let wfAccum=0;
   const wfScrollPxPerSec=70;
 
+  let wfDpr=Math.max(1,window.devicePixelRatio||1);
+  const wfScratch=document.createElement('canvas');
+  const wfScratchCtx=wfScratch.getContext('2d',{alpha:true});
+
   function resizeWaterfallCanvas(){
     const r=$('#waterfall').getBoundingClientRect();
-    const dpr=Math.max(1,window.devicePixelRatio||1);
-    const old=document.createElement('canvas');
-    old.width=wfCanvas.width; old.height=wfCanvas.height;
-    if(old.width&&old.height) old.getContext('2d').drawImage(wfCanvas,0,0);
+    wfDpr=Math.max(1,window.devicePixelRatio||1);
+    const cssW=Math.max(1,Math.round(r.width));
+    const cssH=Math.max(1,Math.round(r.height));
 
-    wfCanvas.width=Math.max(1,Math.round(r.width*dpr));
-    wfCanvas.height=Math.max(1,Math.round(r.height*dpr));
-    wfCanvas.style.width=r.width+'px';
-    wfCanvas.style.height=r.height+'px';
-    wfCtx.setTransform(dpr,0,0,dpr,0,0);
+    wfScratch.width=wfCanvas.width||Math.round(cssW*wfDpr);
+    wfScratch.height=wfCanvas.height||Math.round(cssH*wfDpr);
+    wfScratchCtx.setTransform(1,0,0,1,0,0);
+    wfScratchCtx.clearRect(0,0,wfScratch.width,wfScratch.height);
+    if(wfCanvas.width&&wfCanvas.height) wfScratchCtx.drawImage(wfCanvas,0,0);
+
+    wfCanvas.width=Math.round(cssW*wfDpr);
+    wfCanvas.height=Math.round(cssH*wfDpr);
+    wfCanvas.style.width=cssW+'px';
+    wfCanvas.style.height=cssH+'px';
+    wfCtx.setTransform(1,0,0,1,0,0);
+    wfCtx.clearRect(0,0,wfCanvas.width,wfCanvas.height);
     wfCtx.imageSmoothingEnabled=false;
-
-    if(old.width&&old.height){
-      wfCtx.drawImage(old,0,0,old.width,old.height,0,0,r.width,r.height);
-    }
+    if(wfScratch.width&&wfScratch.height) wfCtx.drawImage(wfScratch,0,0,wfScratch.width,wfScratch.height,0,0,wfCanvas.width,wfCanvas.height);
   }
   resizeWaterfallCanvas();
   window.addEventListener('resize',()=>{ resizeWaterfallCanvas(); syncActivityPanelHeight(); });
@@ -683,32 +709,33 @@
     wfLast=ts;
     wfAccum += wfScrollPxPerSec*dt;
 
-    const w=wfCanvas.clientWidth;
-    const h=wfCanvas.clientHeight;
+    const w=wfCanvas.width;
+    const h=wfCanvas.height;
 
     if(w>0 && h>0 && wfAccum>=1){
-      const dy=Math.floor(wfAccum);
-      wfAccum-=dy;
-
-      // Move existing waterfall down as a bitmap: no DOM nodes, no layout churn.
-      wfCtx.save();
-      wfCtx.globalCompositeOperation='copy';
-      wfCtx.drawImage(wfCanvas,0,0,w,h-dy,0,dy,w,h-dy);
-      wfCtx.restore();
-      wfCtx.clearRect(0,0,w,dy);
+      const dyCss=Math.floor(wfAccum);
+      wfAccum-=dyCss;
+      const dy=Math.max(1,Math.round(dyCss*wfDpr));
+      wfScratch.width=w; wfScratch.height=h;
+      wfScratchCtx.setTransform(1,0,0,1,0,0);
+      wfScratchCtx.globalCompositeOperation='copy';
+      wfScratchCtx.drawImage(wfCanvas,0,0);
+      wfCtx.setTransform(1,0,0,1,0,0);
+      wfCtx.clearRect(0,0,w,h);
+      if(h>dy) wfCtx.drawImage(wfScratch,0,0,w,h-dy,0,dy,w,h-dy);
     }
 
-    // Draw only the current keyed state at the top edge.
-    // Service frequencies are reserved visually: suppress green traces under the amber service.
+    // Draw current keyed energy at the top edge in backing-store pixels.
     const traces=[...activeTraces.values()].sort((a,b)=>(a.kind==='service')-(b.kind==='service'));
     traces.forEach(t=>{
       if(t.kind!=='service' && isNearServiceFreq(t.freq)) return;
-      const x=freqToX(t.freq);
-      if(x<0 || x>w) return;
+      const xCss=freqToX(t.freq);
+      if(xCss<0 || xCss>w/wfDpr) return;
+      const x=Math.round(xCss*wfDpr);
       wfCtx.fillStyle=wfColor(t.kind);
-      const traceW=t.kind==='service'?7:3;
-      const traceH=t.kind==='service'?4:3;
-      wfCtx.fillRect(Math.round(x)-traceW/2,0,traceW,traceH);
+      const traceW=Math.max(2,Math.round((t.kind==='service'?7:3)*wfDpr));
+      const traceH=Math.max(2,Math.round((t.kind==='service'?4:3)*wfDpr));
+      wfCtx.fillRect(Math.round(x-traceW/2),0,traceW,traceH);
     });
 
     requestAnimationFrame(scrollWaterfall);
@@ -890,6 +917,14 @@
     syncLike();
     // SUPABASE HOOK: mp/cw_network like RPC goes here.
   };
+  window.addEventListener('error',e=>{
+    try{ log('Client error: '+(e.message||'unknown error')); }catch(_){}
+    $('#netState').textContent='CLIENT ERROR';
+  });
+  window.addEventListener('unhandledrejection',e=>{
+    try{ log('Client error: '+(e.reason?.message||e.reason||'promise rejection')); }catch(_){}
+  });
+
   $('#activityDetails').classList.add('servicesHidden');
   $('#iambicMode').disabled=true;
   $('#iambicMode').classList.add('disabledCtl');
