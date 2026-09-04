@@ -6,7 +6,7 @@ navegador.**
 **Autor:** Mathias Maidana --- **ZP5DXS**\
 **Proyecto:** CW Network Radio\
 **Versión actual:** v0.25\
-**Live demo:** https://zp5dxs.github.io/CW-Network/\
+**Live demo:** https://zp5dxs.github.io/CW-Network/
 **Repositorio:** https://github.com/ZP5DXS/CW-Network
 
 ------------------------------------------------------------------------
