@@ -85,6 +85,12 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 .log div{padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04)}.log time{color:#6f7d88;margin-right:7px}
 .callbox{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .callbox input{width:100%;padding:9px;border:1px solid var(--line);border-radius:9px;background:#0c1115;color:var(--text)}
+.stationSaveRow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-top:8px}
+.stationSaveBtn{border:1px solid #39784f;background:#173323;color:#b7f3cb;border-radius:9px;padding:8px 10px;cursor:pointer;font-weight:800}
+.stationSaveBtn.dirty{background:#3d2b17;border-color:#75502c;color:#ffd49a}
+.stationSaveStatus{font-size:11px;color:var(--muted);white-space:nowrap}
+.stationSaveStatus.ok{color:#8fe5aa}.stationSaveStatus.warn{color:#e2c36b}.stationSaveStatus.err{color:#f06b6b}
+
 .footer{margin-top:12px;text-align:center;color:var(--muted);font-size:12px}
 @media(max-width:980px){.radio{grid-template-columns:1fr}.controls{grid-template-columns:repeat(3,1fr)}.statusbar{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:650px){.display,.row2,.dialwrap,.rotor{grid-template-columns:1fr}.controls{grid-template-columns:repeat(2,1fr)}.dial,.compass{margin:auto}.statusbar{grid-template-columns:1fr 1fr}.callbox{grid-template-columns:1fr}}
@@ -103,6 +109,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 .bandnpc{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:12px}
 .bandnpc:last-child{border-bottom:0}
 .bandnpc span{color:var(--muted)}
+.bandnpc{cursor:pointer;border-radius:7px;padding-left:5px;padding-right:5px}.bandnpc:hover{background:rgba(255,255,255,.04)}
 
 .activityPanel{overflow:hidden;display:grid;grid-template-rows:auto minmax(150px,.72fr) minmax(0,1.28fr);min-height:0}
 .activityHead{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:9px}
@@ -250,7 +257,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
             <button class="keybtn" data-keymode="PADDLE">PADDLE</button>
             <button class="keybtn" id="reverse" disabled>REVERSE</button>
           </div>
-          <div class="keybar" id="keybar" role="button" tabindex="0" aria-label="CW transmit key. Space, left and right Control, brackets, mouse or touch.">SPACE / CTRL / [ ] / TOUCH · KEY</div>
+          <div class="keybar" id="keybar" role="button" tabindex="0" aria-label="CW transmit key. Space, left and right Control, brackets, mouse or touch.">SPACE / CTRL / [ ] / MOUSE / TOUCH · KEY</div>
           
         </div>
       </section>
@@ -282,10 +289,14 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
       <section class="card">
         <h3 style="margin-top:0">Station</h3>
         <div class="callbox">
-          <input id="callsign" placeholder="CALLSIGN" value="ZP5DXS">
+          <input id="callsign" placeholder="CALLSIGN" value="">
           <input id="locator" placeholder="LOCATOR" value="">
         </div>
-        <p style="color:var(--muted);font-size:12px;margin-bottom:0">Only callsign is required. Locator enables distance, bearing and antenna logic.</p>
+        <div class="stationSaveRow">
+          <button class="stationSaveBtn" id="saveStation">SAVE STATION</button>
+          <span class="stationSaveStatus" id="stationSaveStatus">Not saved</span>
+        </div>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:0">Callsign is required. Locator is saved with it and enables distance, bearing and antenna logic.</p>
       </section>
 
       <section class="card">
@@ -340,7 +351,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 
   <footer class="footer footerStats">
     <div class="footerBrand">
-      <div class="footerTitle">CW NETWORK RADIO <span>· v0.37</span></div>
+      <div class="footerTitle">CW NETWORK RADIO <span>· v0.39</span></div>
       <div class="footerTag">Free · No ads · Browser-based · Worldwide CW · AI assisted by Gemini</div>
       <div class="flagMarquee" aria-label="Worldwide CW">
         <div class="flagTrack">
@@ -359,6 +370,6 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
   </footer>
 </div>
 
-<script src="radio.js?v=037" defer></script>
+<script src="radio.js?v=039" defer></script>
 </body>
 </html>

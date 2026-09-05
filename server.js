@@ -203,7 +203,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.37',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.39',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -286,7 +286,7 @@ function makeBot(b,index){
  return {stationId:id('v'),kind:'virtual',callsign:virtualCall(),locator:loc.locator,
  band:b,hz:randomFreq(b),homeHz:0,power:10+Math.floor(Math.random()*65),antenna:2,azimuth:0,wpm,homeWpm:13,keyMode:p.keyMode,
  iambicMode:'A',busy:false,keyDown:false,active:true,name:botNames[Math.floor(Math.random()*botNames.length)],
- qth:loc.qth,role:p.role,tone:p.tone,state:'LISTEN',lastAction:0,lastCQ:0,waitingUntil:0,partnerId:null,history:[],bornAt:Date.now(),nextMoveAt:0,nextCQAt:Date.now()+2500+Math.random()*8000};
+ qth:loc.qth,role:p.role,tone:p.tone,state:'LISTEN',lastAction:0,lastCQ:0,waitingUntil:0,partnerId:null,replyPending:false,history:[],bornAt:Date.now(),nextMoveAt:0,nextCQAt:Date.now()+2500+Math.random()*8000,cqCount:0};
 }
 const bots=new Map();
 for(const b of VALID_BANDS)for(let i=0;i<personaStyles.length;i++){const st=makeBot(b,i);st.homeHz=st.hz;bots.set(st.stationId,st)}
@@ -296,19 +296,20 @@ for(const b of VALID_BANDS){
  pool.forEach((st,i)=>{
   st.active=i<4;
   st.bornAt=Date.now();
-  st.nextMoveAt=Date.now()+65000+Math.random()*90000;
+  st.nextMoveAt=Date.now()+270000+Math.random()*90000;
   st.nextCQAt=Date.now()+1800+i*2200+Math.random()*4500;
  });
 }
 
 const services=new Map([...VALID_BANDS].map(b=>[b,{stationId:`svc_${b}`,kind:'service',callsign:'CWN',locator:'',band:b,hz:SERVICE_FREQ[b],power:40,antenna:2,azimuth:0,wpm:18,keyMode:'PADDLE',iambicMode:'A',busy:false,keyDown:false,active:true}]));
 const qsoSessions=new Map();
+const pileups=new Map();
 
 function humansOnBand(b){return [...clients.values()].filter(s=>s.band===b).length}
 function activeBotsOnBand(b){return [...bots.values()].filter(x=>x.active&&x.band===b)}
 function bandOccupiedNear(b,hz,span=220,exclude=''){return [...clients.values(),...bots.values()].some(s=>s.stationId!==exclude&&s.band===b&&s.keyDown&&Math.abs(s.hz-hz)<span)}
 function setBotActive(st,on){
- if(st.active===on)return;st.active=on;st.keyDown=false;st.busy=false;st.partnerId=null;st.state='LISTEN';
+ if(st.active===on)return;st.active=on;st.keyDown=false;st.busy=false;st.partnerId=null;st.replyPending=false;st.state='LISTEN';pileups.delete(st.stationId);
  if(on){if(!st.hz)st.hz=st.homeHz||randomFreq(st.band);broadcast({type:'station_state',...publicState(st)})}
  else broadcast({type:'station_left',stationId:st.stationId});
 }
@@ -317,48 +318,42 @@ function rebalanceBots(){
   const pool=[...bots.values()].filter(x=>x.band===b);
   const now=Date.now();
 
-  // Keep the band populated: never fewer than 3, usually 4, sometimes all 5.
-  const targetRoll=Math.random();
-  const target=targetRoll<.12?5:(targetRoll<.88?4:3);
+  // Stable population: four callers per band. This is above the requested
+  // minimum of three, but avoids the rapid random churn of earlier versions.
   let active=pool.filter(x=>x.active);
-
-  while(active.length<target){
+  while(active.length<4){
    const candidates=pool.filter(x=>!x.active);
    if(!candidates.length)break;
    const st=candidates[Math.floor(Math.random()*candidates.length)];
    st.hz=randomFreeFreq(b,st.stationId);st.homeHz=st.hz;st.wpm=st.homeWpm=13;
-   st.bornAt=now;
-   st.nextMoveAt=now+65000+Math.random()*90000;
-   st.nextCQAt=now+1500+Math.random()*7000;
+   st.bornAt=now;st.cqCount=0;
+   st.nextMoveAt=now+270000+Math.random()*90000; // 4.5-6 min on air
+   st.nextCQAt=now+1500+Math.random()*6500;
    setBotActive(st,true);
    active.push(st);
   }
 
-  if(active.length>target){
-   const removable=active
-    .filter(x=>!x.busy&&x.state==='LISTEN')
-    .sort((a,c)=>(a.bornAt||0)-(c.bornAt||0));
-   for(const st of removable.slice(0,Math.max(0,active.length-target)))setBotActive(st,false);
-  }
-
-  // Rotate callers periodically so callsigns and activities appear/disappear.
+  // Rotate only after roughly five minutes, and never during an exchange.
   active=pool.filter(x=>x.active);
-  const old=active.find(x=>!x.busy&&x.state==='LISTEN'&&now>(x.nextMoveAt||Infinity));
-  if(old){
+  const expired=active
+   .filter(x=>!x.busy&&x.state==='LISTEN'&&now>(x.nextMoveAt||Infinity))
+   .sort((a,c)=>(a.nextMoveAt||0)-(c.nextMoveAt||0));
+
+  for(const old of expired){
    const replacement=pool.filter(x=>!x.active);
-   if(replacement.length){
-    setBotActive(old,false);
-    const st=replacement[Math.floor(Math.random()*replacement.length)];
-    st.hz=randomFreeFreq(b,st.stationId);st.homeHz=st.hz;st.wpm=st.homeWpm=13;
-    st.bornAt=now;st.nextMoveAt=now+65000+Math.random()*90000;
-    st.nextCQAt=now+1200+Math.random()*5500;
-    setBotActive(st,true);
-   }else{
-    old.hz=randomFreeFreq(b,old.stationId);old.homeHz=old.hz;
-    old.nextMoveAt=now+65000+Math.random()*90000;
-    old.nextCQAt=now+1800+Math.random()*7000;
-    broadcast({type:'station_state',...publicState(old)});
+   if(!replacement.length){
+    old.nextMoveAt=now+270000+Math.random()*90000;
+    old.cqCount=0;
+    continue;
    }
+   setBotActive(old,false);
+   pileups.delete(old.stationId);
+   const st=replacement[Math.floor(Math.random()*replacement.length)];
+   st.hz=randomFreeFreq(b,st.stationId);st.homeHz=st.hz;st.wpm=st.homeWpm=13;
+   st.bornAt=now;st.cqCount=0;
+   st.nextMoveAt=now+270000+Math.random()*90000;
+   st.nextCQAt=now+1200+Math.random()*6000;
+   setBotActive(st,true);
   }
  }
 }
@@ -504,7 +499,7 @@ async function botCallCQ(st){
   broadcast({type:'station_state',...publicState(st)});
  }
  st.wpm=st.homeWpm=13;
- st.state='CQ';st.lastCQ=Date.now();
+ st.state='CQ';st.lastCQ=Date.now();st.cqCount=(st.cqCount||0)+1;
  const text={
   SKCC:`CQ SKCC CQ SKCC DE ${st.callsign} ${st.callsign} K`,
   POTA:`CQ POTA CQ POTA DE ${st.callsign} ${st.callsign} K`,
@@ -513,13 +508,13 @@ async function botCallCQ(st){
   CQ:`CQ CQ CQ DE ${st.callsign} ${st.callsign} K`
  }[st.role]||`CQ CQ DE ${st.callsign} ${st.callsign} K`;
  transmitVirtual(st,text,{after:()=>{
-  st.state='WAIT_REPLY';st.waitingUntil=Date.now()+16000;
+  st.state='WAIT_REPLY';st.waitingUntil=Date.now()+18000;
   setTimeout(()=>{
    if(st.state==='WAIT_REPLY'&&Date.now()>=st.waitingUntil){
     st.state='LISTEN';st.wpm=st.homeWpm=13;
-    st.nextCQAt=Date.now()+4500+Math.random()*8500;
+    st.nextCQAt=Date.now()+6500+Math.random()*9500;
    }
-  },16500);
+  },18500);
  }});
 }
 async function trafficDirector(){
@@ -527,7 +522,15 @@ async function trafficDirector(){
  for(const b of VALID_BANDS){
   const active=activeBotsOnBand(b);
   for(const st of active){
+   if(st.state==='WAIT_HUMAN'&&st.waitingUntil&&now>=st.waitingUntil){
+    st.state='LISTEN';st.partnerId=null;st.wpm=st.homeWpm=13;
+    clearBotSessions(st.stationId);pileups.delete(st.stationId);
+    st.hz=st.homeHz||st.hz;
+    st.nextCQAt=now+7000+Math.random()*9000;
+    broadcast({type:'station_state',...publicState(st)});
+   }
    if(st.busy||st.state!=='LISTEN')continue;
+   if(now>=(st.nextMoveAt||Infinity))continue;
    if(now<(st.nextCQAt||0))continue;
 
    // Each virtual operator has its own cadence. They may overlap naturally as
@@ -567,7 +570,9 @@ function sessionPush(sess,from,text){
  sess.history=sess.history||[];sess.history.push({from,text:String(text).slice(0,180)});sess.history=sess.history.slice(-10);sess.last=Date.now();
 }
 async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpeed=false,session=null,sessionKeyValue=null}={}){
- if(!bot||bot.busy)return;
+ if(!bot||bot.busy||bot.replyPending)return;
+ if(bot.partnerId&&bot.partnerId!==user.stationId)return;
+ bot.replyPending=true;
  const normalWpm=bot.homeWpm||bot.wpm;
  let replyWpm=normalWpm;
  if(matchHumanSpeed)replyWpm=observedHumanWpm(user);
@@ -583,9 +588,8 @@ async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpee
    if(stage==='CLOSE'){
     const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,t:Date.now()});
     bot.state='LISTEN';bot.partnerId=null;bot.wpm=bot.homeWpm=13;
-    bot.hz=randomFreeFreq(bot.band,bot.stationId);bot.homeHz=bot.hz;
-    bot.nextMoveAt=Date.now()+65000+Math.random()*90000;
-    bot.nextCQAt=Date.now()+5000+Math.random()*9000;
+    bot.hz=bot.homeHz||bot.hz;
+    bot.nextCQAt=Date.now()+8000+Math.random()*9000;
     if(sessionKeyValue)qsoSessions.delete(sessionKeyValue);
     broadcast({type:'station_state',...publicState(bot)});
    }else{
@@ -595,21 +599,50 @@ async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpee
   }});
  },delay+Math.floor(Math.random()*450));
 }
-async function processHumanText(user,text){
- const clean=String(text||'').replace(/\s+/g,' ').trim().toUpperCase();if(!clean||clean.length<1)return;
+function clearBotSessions(botId){
+ for(const key of [...qsoSessions.keys()])if(key.endsWith('|'+botId))qsoSessions.delete(key);
+}
+function callerScore(user,bot,clean){
+ const df=Math.abs((user.hz||0)-(bot.hz||0));
+ let score=Math.max(0,55-df/5);
+ if(clean.includes(bot.callsign))score+=26;
+ const uc=humanLabel(user);
+ if(uc!=='STN'&&clean.includes(uc))score+=24;
+ if(!clean.includes('?'))score+=6;
+ score+=Math.min(12,Math.max(0,(Number(user.power)||10)/8));
+ return score;
+}
+function startPileupResolution(bot){
+ const p=pileups.get(bot.stationId);
+ if(!p||p.timer)return;
+ p.timer=setTimeout(()=>resolvePileup(bot.stationId),1800);
+}
+async function resolvePileup(botId){
+ const bot=bots.get(botId),p=pileups.get(botId);
+ pileups.delete(botId);
+ if(!bot||!bot.active||bot.busy||bot.state!=='WAIT_REPLY'||!p?.candidates?.size)return;
 
- // Caller-only virtual operators: a generic human CQ is ignored.
- // A bot enters a QSO only when the human answers that bot's own CQ,
- // explicitly sends its callsign, or continues an existing exchange.
- const humanIsCallingCQ=/(^|\s)CQ(\s|$)/.test(clean);
- let addressed=[...bots.values()].find(b=>b.active&&b.band===user.band&&clean.includes(b.callsign));
- if(!addressed&&!humanIsCallingCQ){
-  addressed=activeBotsOnBand(user.band).find(b=>
-   ['WAIT_REPLY','WAIT_HUMAN'].includes(b.state)&&
-   Math.abs(b.hz-user.hz)<=280
-  );
+ const list=[...p.candidates.values()].sort((a,b)=>b.score-a.score);
+ const winner=list[0];
+ const runner=list[1];
+
+ // If two callers arrive essentially together at similar strength, behave like
+ // a human operator hearing a pileup: ask QRZ? rather than inventing a winner.
+ if(runner && Math.abs(winner.score-runner.score)<7){
+  bot.state='CQ';
+  transmitVirtual(bot,'QRZ? QRZ? DE '+bot.callsign+' K',{after:()=>{
+   bot.state='WAIT_REPLY';bot.waitingUntil=Date.now()+16000;
+  }});
+  return;
  }
- if(!addressed)return;
+
+ // Lock the virtual operator to exactly one station before any AI/network delay.
+ bot.partnerId=winner.user.stationId;
+ bot.state='QSO';
+ broadcast({type:'station_state',...publicState(bot)});
+ return engageHumanWithBot(winner.user,bot,winner.text);
+}
+async function engageHumanWithBot(user,addressed,clean){
  const key=sessionKey(user.stationId,addressed.stationId);
  let sess=qsoSessions.get(key);
  if(!sess){
@@ -630,6 +663,45 @@ async function processHumanText(user,text){
  }
  sess.stage++;
  return scheduleBotReply(user,addressed,'QSO',clean,500,{matchHumanSpeed:false,session:sess,sessionKeyValue:key});
+}
+async function processHumanText(user,text){
+ const clean=String(text||'').replace(/\s+/g,' ').trim().toUpperCase();
+ if(!clean)return;
+
+ const humanIsCallingCQ=/(^|\s)CQ(\s|$)/.test(clean);
+
+ // First, continue an already locked QSO. Other callers are ignored until it ends.
+ const partnered=[...bots.values()].find(b=>
+  b.active&&b.band===user.band&&b.partnerId===user.stationId&&
+  ['QSO','WAIT_HUMAN'].includes(b.state)
+ );
+ if(partnered)return engageHumanWithBot(user,partnered,clean);
+
+ // Caller-only policy: generic human CQ never wakes a bot.
+ if(humanIsCallingCQ)return;
+
+ // A new answer is eligible only while that virtual operator is actually waiting
+ // after its own CQ. Explicitly typing/copying a bot call cannot steal a busy QSO.
+ let addressed=[...bots.values()].find(b=>
+  b.active&&b.band===user.band&&b.state==='WAIT_REPLY'&&
+  clean.includes(b.callsign)
+ );
+ if(!addressed){
+  addressed=activeBotsOnBand(user.band).find(b=>
+   b.state==='WAIT_REPLY'&&Math.abs(b.hz-user.hz)<=280
+  );
+ }
+ if(!addressed)return;
+
+ let p=pileups.get(addressed.stationId);
+ if(!p){
+  p={candidates:new Map(),timer:null,openedAt:Date.now()};
+  pileups.set(addressed.stationId,p);
+ }
+ const score=callerScore(user,addressed,clean);
+ const prev=p.candidates.get(user.stationId);
+ if(!prev||score>prev.score)p.candidates.set(user.stationId,{user,text:clean,score,at:Date.now()});
+ startPileupResolution(addressed);
 }
 // Adaptive straight-key decoder: estimates dit length from short marks instead of trusting only selected WPM.
 function decoderState(st){if(!st.decoder)st.decoder={marks:'',text:'',downAt:0,lastUp:0,charTimer:null,phraseTimer:null,samples:[],unit:1200/Math.max(5,st.wpm||15),recentChars:'',cqSeen:false};return st.decoder}
@@ -709,7 +781,7 @@ const server=http.createServer(async(req,res)=>{
  const urlObj=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.37',
+   ok:true,service:'CW Network',version:'0.39',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -797,4 +869,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.37 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.39 listening on ${PORT}`));

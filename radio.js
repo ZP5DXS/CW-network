@@ -150,11 +150,15 @@
     redraw();
     scheduleStateSend(true);
   });
-  $('#dial').addEventListener('wheel', e=>{
+  const wheelTune=e=>{
     e.preventDefault();
+    e.stopPropagation();
     const step=vfoStep*(vfoFast?10:1);
     tuneBy(e.deltaY<0?step:-step);
-  },{passive:false});
+    scheduleStateSend();
+  };
+  $('#waterfall').addEventListener('wheel',wheelTune,{passive:false});
+  $('#dial').addEventListener('wheel',wheelTune,{passive:false});
 
   function pointerAngle(e){
     const r=$('#dial').getBoundingClientRect();
@@ -226,6 +230,13 @@
       if(!st || st.band!==band) continue;
       const df=Math.abs((st.hz||0)-hz);
       if(df<bestDf){ bestDf=df; best=st; }
+    }
+    for(const p of cwFramePlaybacks.values()){
+      if(performance.now()>=(p.until||0))continue;
+      const st=p.st;
+      if(!st || st.band!==band)continue;
+      const df=Math.abs((st.hz||0)-hz);
+      if(df<bestDf){bestDf=df;best=st;}
     }
     return bestDf<=480 ? best : null;
   }
@@ -364,8 +375,10 @@
     $('#iambicMode').classList.toggle('disabledCtl',!paddleOn);
     $('#reverse').disabled=!paddleOn;
     $('#keybar').textContent=keyMode==='STRAIGHT'
-      ? 'SPACE / CTRL / [ ] / TOUCH · KEY'
-      : (iambicMode==='BUG' ? 'PADDLE · BUG' : 'PADDLE · IAMBIC '+iambicMode);
+      ? 'SPACE / CTRL / [ ] / MOUSE / TOUCH · KEY'
+      : (iambicMode==='BUG'
+          ? 'PADDLE · BUG · LEFT DIT / RIGHT DAH'
+          : 'PADDLE · IAMBIC '+iambicMode+' · LEFT DIT / RIGHT DAH');
 
     log('Key input: '+keyMode+'.');
     scheduleStateSend();
@@ -883,7 +896,16 @@
   }
 
   window.addEventListener('keydown',e=>{
-    if(e.code==='Space' && !isEditing()) e.preventDefault();
+    if(e.code==='Space' && !isEditing()){
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  },{capture:true,passive:false});
+  window.addEventListener('keyup',e=>{
+    if(e.code==='Space' && !isEditing()){
+      e.preventDefault();
+      e.stopPropagation();
+    }
   },{capture:true,passive:false});
 
   document.addEventListener('keydown',e=>{
@@ -963,22 +985,90 @@
   });
 
   const keybar=$('#keybar');
+  const mousePaddleHeld=new Map();
+
+  function applyMousePaddle(button,down){
+    if(keyMode!=='PADDLE') return false;
+    if(button!==0 && button!==2) return false;
+
+    // Left = DIT, right = DAH. REVERSE swaps them, same as keyboard paddle inputs.
+    let element=button===0?'dit':'dah';
+    if($('#reverse').classList.contains('active')) element=element==='dit'?'dah':'dit';
+
+    if(down){
+      if(mousePaddleHeld.has(button)) return true;
+      mousePaddleHeld.set(button,element);
+      if(element==='dit') paddleDit=true; else paddleDah=true;
+
+      if(iambicMode==='BUG'){
+        if(element==='dit') runBugDits();
+        else{
+          manualDahDown=true;
+          cancelKeyer();
+          if(!tx) keyDown();
+        }
+      }else runKeyer();
+    }else{
+      const held=mousePaddleHeld.get(button)||element;
+      mousePaddleHeld.delete(button);
+      if(held==='dit') paddleDit=false; else paddleDah=false;
+
+      if(iambicMode==='BUG' && held==='dah'){
+        manualDahDown=false;
+        if(tx && !keyerElementActive) keyUp();
+        if(paddleDit) runBugDits();
+      }else if(iambicMode!=='BUG' && !keyerLoopTimer && !keyerElementActive){
+        runKeyer();
+      }
+    }
+    return true;
+  }
+
   keybar.addEventListener('contextmenu',e=>e.preventDefault());
   keybar.addEventListener('dragstart',e=>e.preventDefault());
   keybar.addEventListener('selectstart',e=>e.preventDefault());
   keybar.addEventListener('pointerdown',e=>{
     e.preventDefault();
+    e.stopPropagation();
     try{keybar.setPointerCapture(e.pointerId)}catch{}
-    directPress('POINTER_'+e.pointerId);
+
+    if(keyMode==='PADDLE' && applyMousePaddle(e.button,true)) return;
+
+    // Straight key: either primary or secondary mouse button keys the transmitter.
+    if(e.button===0 || e.button===2) directPress('POINTER_'+e.pointerId);
   });
+
   const releasePointer=e=>{
     e.preventDefault();
-    directRelease('POINTER_'+e.pointerId);
-    try{if(keybar.hasPointerCapture(e.pointerId))keybar.releasePointerCapture(e.pointerId)}catch{}
+    e.stopPropagation();
+
+    if(keyMode==='PADDLE'){
+      applyMousePaddle(e.button,false);
+    }else{
+      directRelease('POINTER_'+e.pointerId);
+    }
+
+    try{
+      if(keybar.hasPointerCapture(e.pointerId))keybar.releasePointerCapture(e.pointerId);
+    }catch{}
   };
+
   keybar.addEventListener('pointerup',releasePointer);
-  keybar.addEventListener('pointercancel',releasePointer);
-  keybar.addEventListener('lostpointercapture',e=>directRelease('POINTER_'+e.pointerId));
+  keybar.addEventListener('pointercancel',e=>{
+    e.preventDefault();
+    mousePaddleHeld.clear();
+    paddleDit=false;paddleDah=false;manualDahDown=false;
+    directRelease('POINTER_'+e.pointerId);
+    if(tx && !keyerElementActive) keyUp();
+  });
+  keybar.addEventListener('lostpointercapture',e=>{
+    directRelease('POINTER_'+e.pointerId);
+  });
+
+  // Safety release even if the pointer leaves the manipulation area/browser chrome.
+  window.addEventListener('pointerup',e=>{
+    if(mousePaddleHeld.has(e.button)) applyMousePaddle(e.button,false);
+  },{capture:true});
   window.addEventListener('blur',()=>{
     directHeld.clear();paddleDit=false;paddleDah=false;manualDahDown=false;
     stopKeyerLoop(true);if(tx)keyUp();
@@ -1087,17 +1177,128 @@
   }
   requestAnimationFrame(scrollWaterfall);
 
-  // -------- Network services display --------
+  // -------- Network services / active station spots --------
   function updateServiceUI(){ return serviceFreqByBand[band]; }
   function renderNpcList(){
-    const services=[{label:'NETWORK INFO',freq:serviceFreqByBand[band]}];
-    $('#npcList').innerHTML=services.map(s=>
-      `<div class="bandnpc"><b>${(s.freq/1e6).toFixed(6)} MHz</b><span>${s.label}</span></div>`
+    const rows=[{
+      freq:serviceFreqByBand[band],
+      label:'NETWORK INFO',
+      kind:'service'
+    }];
+
+    const bots=[...remoteStations.values()]
+      .filter(s=>s.kind==='virtual' && s.band===band)
+      .sort((a,b)=>(a.hz||0)-(b.hz||0));
+
+    bots.forEach(s=>rows.push({
+      freq:s.hz,
+      label:`${s.callsign||'—'} · ${s.role||'CQ'} · ${s.wpm||13} WPM`,
+      kind:'bot'
+    }));
+
+    $('#npcList').innerHTML=rows.map(s=>
+      `<div class="bandnpc" data-freq="${Math.round(s.freq||0)}" title="Tune to ${(s.freq/1e6).toFixed(6)} MHz">
+        <b>${(s.freq/1e6).toFixed(6)} MHz</b>
+        <span>${s.label}</span>
+      </div>`
     ).join('');
+
+    // The service panel doubles as a spot list: click any row to tune there.
+    $$('#npcList .bandnpc').forEach(row=>{
+      row.style.cursor='pointer';
+      row.onclick=()=>{
+        const target=Number(row.dataset.freq);
+        if(!Number.isFinite(target)) return;
+        if(vfoTuneMode==='SCAN') setTuneMode('NORMAL');
+        hz=target; clampHz(); redraw(); scheduleStateSend(true);
+      };
+    });
   }
   $('#activityDetailsToggle').onchange=()=>{
     $('#activityDetails').classList.toggle('servicesHidden',!$('#activityDetailsToggle').checked);
+    if($('#activityDetailsToggle').checked) renderNpcList();
   };
+
+  const STATION_STORAGE_KEY='cwNetworkStationV1';
+  let stationSavedSnapshot='';
+
+  function normalizedStationIdentity(){
+    return {
+      callsign:($('#callsign').value||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,16),
+      locator:($('#locator').value||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,10)
+    };
+  }
+  function validCallsign(v){
+    return /^(?=.{3,12}$)(?=.*[A-Z])(?=.*\d)[A-Z0-9]+(?:\/[A-Z0-9]+)?$/.test(v);
+  }
+  function validLocator(v){
+    return !v || /^[A-R]{2}\d{2}(?:[A-X]{2})?$/.test(v);
+  }
+  function setStationFeedback(text,state=''){
+    const el=$('#stationSaveStatus');
+    el.textContent=text;
+    el.classList.remove('ok','warn','err');
+    if(state)el.classList.add(state);
+  }
+  function updateStationDirtyUi(){
+    const id=normalizedStationIdentity();
+    const sig=JSON.stringify(id);
+    const dirty=sig!==stationSavedSnapshot;
+    $('#saveStation').classList.toggle('dirty',dirty);
+    $('#saveStation').textContent=stationSavedSnapshot?(dirty?'SAVE CHANGES':'SAVED'):'SAVE STATION';
+    if(dirty && stationSavedSnapshot)setStationFeedback('Unsaved changes','warn');
+  }
+  function loadStationIdentity(){
+    try{
+      const saved=JSON.parse(localStorage.getItem(STATION_STORAGE_KEY)||'null');
+      if(saved && typeof saved==='object'){
+        $('#callsign').value=String(saved.callsign||'').toUpperCase().slice(0,16);
+        $('#locator').value=String(saved.locator||'').toUpperCase().slice(0,10);
+        stationSavedSnapshot=JSON.stringify(normalizedStationIdentity());
+        setStationFeedback('Saved locally','ok');
+        $('#saveStation').textContent='SAVED';
+        return;
+      }
+    }catch(_){}
+    stationSavedSnapshot='';
+    setStationFeedback('Not saved','');
+  }
+  function saveStationIdentity(){
+    const id=normalizedStationIdentity();
+    $('#callsign').value=id.callsign;
+    $('#locator').value=id.locator;
+    if(!validCallsign(id.callsign)){
+      setStationFeedback('Invalid callsign','err');
+      $('#saveStation').classList.add('dirty');
+      return false;
+    }
+    if(!validLocator(id.locator)){
+      setStationFeedback('Invalid locator','err');
+      $('#saveStation').classList.add('dirty');
+      return false;
+    }
+    try{
+      localStorage.setItem(STATION_STORAGE_KEY,JSON.stringify(id));
+      stationSavedSnapshot=JSON.stringify(id);
+      $('#saveStation').classList.remove('dirty');
+      $('#saveStation').textContent='SAVED';
+      setStationFeedback('Saved locally','ok');
+      scheduleStateSend(true);
+      refreshRemoteVoices();
+      return true;
+    }catch(_){
+      setStationFeedback('Could not save','err');
+      return false;
+    }
+  }
+  $('#saveStation').onclick=saveStationIdentity;
+  ['callsign','locator'].forEach(id=>{
+    $('#'+id).addEventListener('input',()=>{
+      $('#'+id).value=$('#'+id).value.toUpperCase();
+      updateStationDirtyUi();
+    });
+  });
+  loadStationIdentity();
 
   function stationPayload(){
     return {
@@ -1183,15 +1384,21 @@
       return;
     }
     if(m.type==='snapshot'){
+      remoteStations.clear();
       (m.stations||[]).forEach(s=>{
         remoteStations.set(s.stationId,s);
         if(s.keyDown && s.stationId!==stationId) remoteKeyDown(s);
       });
+      renderNpcList();
       return;
     }
-    if(m.type==='station_state' && m.stationId!==stationId){ remoteStations.set(m.stationId,m); return; }
+    if(m.type==='station_state' && m.stationId!==stationId){
+      remoteStations.set(m.stationId,m);
+      if(m.kind==='virtual' && m.band===band) renderNpcList();
+      return;
+    }
     if(m.type==='station_left'){
-      remoteStations.delete(m.stationId); remoteKeyUp(m.stationId); return;
+      remoteStations.delete(m.stationId); remoteKeyUp(m.stationId); renderNpcList(); return;
     }
     if(m.type==='activity' && m.message) { log(m.message); return; }
     if(m.type==='cw_frame' && m.stationId!==stationId){ playCwFrame(m); return; }
@@ -1543,8 +1750,8 @@
   }
   function startMeter(){ if(meterTimer) return; meterTimer=setInterval(()=>{refreshRemoteVoices();updateSmeter();},120); }
 
-  $('#callsign').addEventListener('change',()=>scheduleStateSend(true));
-  $('#locator').addEventListener('change',()=>{scheduleStateSend(true);refreshRemoteVoices();});
+  $('#callsign').addEventListener('change',updateStationDirtyUi);
+  $('#locator').addEventListener('change',()=>{updateStationDirtyUi();refreshRemoteVoices();});
   window.addEventListener('beforeunload',()=>{ try{sendNet({type:'leave'});}catch(_){} });
 
   // -------- Lightweight local usage telemetry placeholders --------
