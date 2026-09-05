@@ -67,14 +67,14 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 .dial{width:150px;height:150px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#3b444b,#161b20 58%,#090b0d 60%);border:4px solid #252d33;box-shadow:inset 0 0 18px rgba(0,0,0,.7),0 8px 20px rgba(0,0,0,.35);position:relative;cursor:grab;user-select:none;touch-action:none;overscroll-behavior:none}
 .dial.dragging{cursor:grabbing}
 .dial:after{content:"";position:absolute;width:5px;height:50px;background:#d6e7dc;border-radius:4px;left:calc(50% - 2px);top:15px;transform-origin:2px 60px;transform:rotate(var(--rot,0deg))}
-.bandbuttons{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}
+.bandbuttons{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
 .bandbuttons button{padding:9px 4px;border-radius:9px;border:1px solid var(--line);background:#11171c;color:var(--text)}
 .bandbuttons button.active{background:#244f38;color:#b7f3cb}
 .keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.keybtn{padding:12px 8px;border-radius:10px;border:1px solid var(--line);background:#11171c;color:var(--text)}
+.keybtn{padding:12px 8px;border-radius:10px;border:1px solid var(--line);background:#11171c;color:var(--text);user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .keybtn.active{background:#3d2b17;color:#ffd49a}
 .keybtn:disabled{opacity:.42;cursor:not-allowed}
-.keybar{height:78px;border:1px solid var(--line);border-radius:11px;background:#0b1115;display:grid;place-items:center;margin-top:8px;font-weight:800;letter-spacing:.15em;color:#92a0aa;user-select:none;touch-action:none;overscroll-behavior:none}
+.keybar{height:78px;border:1px solid var(--line);border-radius:11px;background:#0b1115;display:grid;place-items:center;margin-top:8px;font-weight:800;letter-spacing:.15em;color:#92a0aa;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:none;overscroll-behavior:none;cursor:pointer}
 .keybar.down{background:#371919;color:#ff9191;border-color:#6c3333}
 .rotor{display:grid;grid-template-columns:140px 1fr;gap:12px;align-items:center}
 .compass{width:130px;height:130px;border-radius:50%;border:2px solid #3a444d;position:relative;background:radial-gradient(circle,#151d22 0 55%,#0d1114 56% 100%)}
@@ -233,7 +233,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
           <div>
             <h3 style="margin:0 0 8px">VFO</h3>
             <div class="bandbuttons" id="bandButtons">
-              <button data-band="80">80m</button><button class="active" data-band="40">40m</button>
+              <button class="active" data-band="40">40m</button>
               <button data-band="20">20m</button><button data-band="15">15m</button><button data-band="10">10m</button>
             </div>
             <div class="vfo-tools">
@@ -250,7 +250,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
             <button class="keybtn" data-keymode="PADDLE">PADDLE</button>
             <button class="keybtn" id="reverse" disabled>REV · NORMAL</button>
           </div>
-          <div class="keybar" id="keybar">SPACE / CTRL / [ ] / MOUSE · KEY</div>
+          <div class="keybar" id="keybar" role="button" tabindex="0" aria-label="CW transmit key. Space, left and right Control, brackets, mouse or touch.">SPACE / CTRL / [ ] / TOUCH · KEY</div>
           
         </div>
       </section>
@@ -340,8 +340,8 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 
   <footer class="footer footerStats">
     <div class="footerBrand">
-      <div class="footerTitle">CW NETWORK RADIO <span>· v0.30</span></div>
-      <div class="footerTag">Free · No ads · Browser-based · Worldwide CW</div>
+      <div class="footerTitle">CW NETWORK RADIO <span>· v0.31</span></div>
+      <div class="footerTag">Free · No ads · Browser-based · Worldwide CW · AI assisted by Gemini</div>
       <div class="flagMarquee" aria-label="Worldwide CW">
         <div class="flagTrack">
           <span>🇵🇾</span><span>🇦🇷</span><span>🇧🇷</span><span>🇺🇾</span><span>🇨🇱</span><span>🇵🇪</span><span>🇨🇴</span><span>🇺🇸</span><span>🇨🇦</span><span>🇲🇽</span><span>🇪🇸</span><span>🇵🇹</span><span>🇫🇷</span><span>🇩🇪</span><span>🇮🇹</span><span>🇬🇧</span><span>🇯🇵</span><span>🇦🇺</span><span>🇳🇿</span><span>🇿🇦</span>
@@ -353,12 +353,12 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
     <div class="footerStat"><small>QSOs</small><b id="qsoStat">0</b></div>
     <div class="footerStat"><small>TX</small><b id="txTimeStat">00:00</b></div>
     <div class="footerStat"><small>Bands</small><b id="bandsUsedStat">1</b></div>
-    <div class="footerStat"><small>Visits</small><b id="visitStat">LOCAL</b></div>
-    <div class="footerStat"><small>Countries</small><b id="countryStat">LOCAL</b></div>
+    <div class="footerStat"><small>Visits</small><b id="visitStat">—</b></div>
+    <div class="footerStat"><small>Countries</small><b id="countryStat">—</b></div>
     <button class="likeBtn footerLike" id="likeBtn">♡ Send 73 / Like · <span id="likeCount">0</span></button>
   </footer>
 </div>
 
-<script src="radio.js?v=030" defer></script>
+<script src="radio.js?v=031" defer></script>
 </body>
 </html>

@@ -3,9 +3,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
 
 const PORT=Number(process.env.PORT||10000);
-const VALID_BANDS=new Set([80,40,20,15,10]);
-const BAND_LIMITS={80:[3550000,3560000],40:[7030000,7040000],20:[14025000,14035000],15:[21025000,21035000],10:[28020000,28030000]};
-const SERVICE_FREQ={80:3551500,40:7031500,20:14026500,15:21026500,10:28021500};
+const VALID_BANDS=new Set([40,20,15,10]);
+const BAND_LIMITS={40:[7030000,7040000],20:[14025000,14035000],15:[21025000,21035000],10:[28020000,28030000]};
+const SERVICE_FREQ={40:7031500,20:14026500,15:21026500,10:28021500};
 const clients=new Map(), recentBandTx=new Map([...VALID_BANDS].map(b=>[b,[]]));
 let serverSeq=0;
 let spaceWeather={type:'space_weather',kp:null,sfi:null,updated:null,source:'NOAA SWPC'};
@@ -203,7 +203,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.30',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.31',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -381,9 +381,13 @@ async function startBotToBot(caller,hunter){
  hunter.state='QSO';caller.state='QSO';broadcast({type:'station_state',...publicState(hunter)});
  const session={origin:'bot',stage:1,last:Date.now(),history:[]};
  if(caller.lastText)session.history.push({from:caller.callsign,text:caller.lastText});
- const useFullAI=clients.size>0 || humansOnBand(caller.band)>0;
+ const humanPresent=humansOnBand(caller.band)>0;
+ // External AI budget policy:
+ // - no humans on this band: 0 Gemini calls for bot↔bot traffic
+ // - humans listening on this band: roughly 25% of bot turns may use Gemini
  const getLine=async(bot,other,stage,heard,turn)=>{
-  if(useFullAI || turn===1 || (turn===3&&Math.random()<.35)){
+  const useGemini=humanPresent && Math.random()<.25;
+  if(useGemini){
    const t=await aiReply(bot,other,heard,stage,'bot',session);
    session.history.push({from:bot.callsign,text:t});return t;
   }
@@ -449,7 +453,11 @@ function observedHumanWpm(st){
  }
  return clamp(Math.round(Number(st?.wpm)||15),7,35);
 }
-function chooseBotFor(b,hz){return activeBotsOnBand(b).filter(x=>!x.busy&&x.state!=='QSO').sort((a,c)=>Math.abs(a.hz-hz)-Math.abs(c.hz-hz))[0]||null}
+function chooseBotFor(b,hz){
+ const pool=activeBotsOnBand(b).filter(x=>!x.busy&&x.state!=='QSO');
+ const rank=x=>x.state==='LISTEN'?0:(x.state==='WAIT_REPLY'?1:(x.state==='WAIT_HUMAN'?2:3));
+ return pool.sort((a,c)=>(rank(a)-rank(c))||(Math.abs(a.hz-hz)-Math.abs(c.hz-hz)))[0]||null;
+}
 function sessionKey(userId,botId){return userId+'|'+botId}
 function newQsoSession(origin='botCQ',seed=[]){return {stage:1,last:Date.now(),origin,requestedWpm:null,history:[...seed].slice(-10)}}
 function sessionPush(sess,from,text){
@@ -462,7 +470,7 @@ async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpee
  let replyWpm=normalWpm;
  if(matchHumanSpeed)replyWpm=observedHumanWpm(user);
  if(session?.requestedWpm)replyWpm=session.requestedWpm;
- bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;bot.wpm=clamp(Math.round(replyWpm),7,35);
+ bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;bot.wpm=clamp(Math.round(replyWpm),7,35);bot.waitingUntil=Date.now()+35000;
  broadcast({type:'station_state',...publicState(bot)});
  setTimeout(async()=>{
   if(!bot.active||bot.busy)return;
@@ -488,7 +496,7 @@ async function processHumanText(user,text){
  if(!addressed){
   addressed=activeBotsOnBand(user.band).find(b=>['WAIT_REPLY','WAIT_HUMAN'].includes(b.state)&&Math.abs(b.hz-user.hz)<=650);
  }
- if(!addressed&&/\bCQ\b/.test(clean)){
+ if(!addressed&&/(^|\s)CQ(\s|$)/.test(clean)){
   const bot=chooseBotFor(user.band,user.hz);if(!bot)return;
   const key=sessionKey(user.stationId,bot.stationId);
   const sess=newQsoSession('humanCQ',[{from:humanLabel(user),text:clean}]);
@@ -515,15 +523,39 @@ async function processHumanText(user,text){
  return scheduleBotReply(user,addressed,'QSO',clean,500,{matchHumanSpeed:sess.origin==='humanCQ',session:sess,sessionKeyValue:key});
 }
 // Adaptive straight-key decoder: estimates dit length from short marks instead of trusting only selected WPM.
-function decoderState(st){if(!st.decoder)st.decoder={marks:'',text:'',downAt:0,lastUp:0,charTimer:null,phraseTimer:null,samples:[],unit:1200/Math.max(5,st.wpm||15)};return st.decoder}
+function decoderState(st){if(!st.decoder)st.decoder={marks:'',text:'',downAt:0,lastUp:0,charTimer:null,phraseTimer:null,samples:[],unit:1200/Math.max(5,st.wpm||15),recentChars:'',cqSeen:false};return st.decoder}
 function estimatedUnit(d,st){
  const base=1200/Math.max(5,st.wpm||15);
- const shorts=d.samples.filter(x=>x>20&&x<base*2.2).slice(-14);
- if(shorts.length>=3){const sorted=[...shorts].sort((a,b)=>a-b);return clamp(sorted[Math.floor(sorted.length*.35)],base*.55,base*1.75)}
+ const samples=d.samples.filter(x=>x>18&&x<base*5.5).slice(-24).sort((a,b)=>a-b);
+ if(samples.length>=3){
+  // The lower third is dominated by dits even with an imperfect straight-key fist.
+  const n=Math.max(1,Math.ceil(samples.length*.38));
+  const lower=samples.slice(0,n);
+  const med=lower[Math.floor(lower.length/2)];
+  return clamp(med,base*.45,base*1.85);
+ }
  return d.unit||base;
 }
-function commitServerChar(st){const d=decoderState(st);if(!d.marks)return;d.text+=MORSE_INV[d.marks]||'?';d.marks=''}
-function schedulePhrase(st){const d=decoderState(st);clearTimeout(d.phraseTimer);const unit=estimatedUnit(d,st);d.phraseTimer=setTimeout(()=>{commitServerChar(st);const text=d.text.trim();d.text='';if(text)processHumanText(st,text)},unit*10.5)}
+function commitServerChar(st){
+ const d=decoderState(st);if(!d.marks)return;
+ const ch=MORSE_INV[d.marks]||'?';
+ d.text+=ch;d.recentChars=(d.recentChars+ch).slice(-8);
+ if(d.recentChars.includes('CQ'))d.cqSeen=true;
+ d.marks='';
+}
+function schedulePhrase(st){
+ const d=decoderState(st);clearTimeout(d.phraseTimer);const unit=estimatedUnit(d,st);
+ d.phraseTimer=setTimeout(()=>{
+  commitServerChar(st);
+  let text=d.text.trim();
+  const cqSeen=d.cqSeen;
+  d.text='';d.recentChars='';d.cqSeen=false;
+  // A straight key can make one character imperfect. If the raw decoded stream
+  // clearly contained CQ, preserve that intent so a virtual operator answers.
+  if(cqSeen&&!/\bCQ\b/.test(text))text='CQ '+text;
+  if(text)processHumanText(st,text);
+ },Math.max(650,unit*9.0));
+}
 function serverKeyDown(st,now){
  const d=decoderState(st),unit=estimatedUnit(d,st);clearTimeout(d.charTimer);clearTimeout(d.phraseTimer);
  if(d.lastUp){const gap=now-d.lastUp;if(gap>=unit*4.8){commitServerChar(st);if(d.text&&!d.text.endsWith(' '))d.text+=' '}else if(gap>=unit*2.0)commitServerChar(st)}
@@ -568,7 +600,7 @@ const server=http.createServer(async(req,res)=>{
  const urlObj=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.30',
+   ok:true,service:'CW Network',version:'0.31',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -656,4 +688,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.30 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.31 listening on ${PORT}`));

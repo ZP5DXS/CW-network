@@ -4,7 +4,6 @@
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
   const bands = {
-    80:{base:3.550e6, center:3.555e6, min:3.550e6, max:3.560e6},
     40:{base:7.030e6, center:7.035e6, min:7.030e6, max:7.040e6},
     20:{base:14.025e6,center:14.030e6,min:14.025e6,max:14.035e6},
     15:{base:21.025e6,center:21.030e6,min:21.025e6,max:21.035e6},
@@ -25,7 +24,7 @@
   let liked=localStorage.getItem('cwNetLiked')==='1';
   let likeCount=Number(localStorage.getItem('cwNetLikeCount')||0);
   const SERVICE_CALL='CWN';
-  const serviceFreqByBand={80:3551500,40:7031500,20:14026500,15:21026500,10:28021500};
+  const serviceFreqByBand={40:7031500,20:14026500,15:21026500,10:28021500};
   const npcTemplates=[
     {call:'K1VRT',role:'DX',wpm:24,style:'PADDLE',offset:2100},
     {call:'LU7NPC',role:'SKCC',wpm:14,style:'STRAIGHT',offset:-900},
@@ -366,7 +365,7 @@
     $('#iambicMode').classList.toggle('disabledCtl',!paddleOn);
     $('#reverse').disabled=!paddleOn;
     $('#keybar').textContent=keyMode==='STRAIGHT'
-      ? 'SPACE / CTRL / [ ] / MOUSE · KEY'
+      ? 'SPACE / CTRL / [ ] / TOUCH · KEY'
       : (iambicMode==='BUG' ? 'PADDLE · BUG' : 'PADDLE · IAMBIC '+iambicMode);
 
     log('Key input: '+keyMode+'.');
@@ -472,6 +471,7 @@
     }
     updateNoiseLevel();
     scheduleQrn();
+    scheduleQrm();
   }
 
   function filterCaptureHz(){
@@ -483,7 +483,7 @@
     if(!noiseGain || !audioCtx) return;
     const bw=+$('#filter').value;
     const widthFactor={600:.58,1800:.88,2500:1}[bw]||1;
-    const base={80:.145,40:.115,20:.072,15:.050,10:.036}[band]||.065;
+    const base={40:.185,20:.125,15:.085,10:.052}[band]||.08;
     const nr=$('#nr').classList.contains('active')?.46:1;
     noiseGain.gain.setTargetAtTime(base*widthFactor*nr,audioCtx.currentTime,.08);
     if(noiseBandpass){
@@ -497,7 +497,7 @@
   function scheduleQrn(){
     clearTimeout(qrnTimer);
     if(!audioCtx) return;
-    const bandRate={80:1.25,40:1.00,20:.58,15:.36,10:.24}[band]||.5;
+    const bandRate={40:1.35,20:.78,15:.48,10:.28}[band]||.5;
     const kp=Number.isFinite(spaceWeather.kp)?spaceWeather.kp:2;
     const delay=(1500+Math.random()*5200)/Math.max(.45,bandRate*(1+kp*.05));
     qrnTimer=setTimeout(()=>{
@@ -507,11 +507,40 @@
         const g=audioCtx.createGain();
         const nb=$('#nb').classList.contains('active');
         const nr=$('#nr').classList.contains('active');
-        const amp=(.11+Math.random()*.13)*(nb?.16:1)*(nr?.72:1);
+        const bandAmp={40:1.45,20:1.05,15:.72,10:.48}[band]||.8;
+        const amp=(.12+Math.random()*.16)*bandAmp*(nb?.16:1)*(nr?.72:1);
         g.gain.value=amp;
         src.connect(bp); bp.connect(g); g.connect(rxMaster); src.start();
       }
       scheduleQrn();
+    },delay);
+  }
+
+  let qrmTimer=null;
+  function scheduleQrm(){
+    clearTimeout(qrmTimer);
+    if(!audioCtx)return;
+    const rate={40:1.0,20:.65,15:.38,10:.22}[band]||.4;
+    const delay=(4500+Math.random()*9000)/rate;
+    qrmTimer=setTimeout(()=>{
+      if(audioCtx&&rxMaster){
+        const oscQ=audioCtx.createOscillator();
+        const g=audioCtx.createGain();
+        const offset=(Math.random()<.5?-1:1)*(90+Math.random()*360);
+        oscQ.type='sine';
+        oscQ.frequency.value=Math.max(220,(+$('#tone').value)+offset);
+        const nb=$('#nb').classList.contains('active');
+        const nr=$('#nr').classList.contains('active');
+        const bandAmp={40:.060,20:.042,15:.027,10:.018}[band]||.025;
+        const amp=bandAmp*(nb?.58:1)*(nr?.72:1);
+        const t=audioCtx.currentTime,dur=.18+Math.random()*.55;
+        g.gain.setValueAtTime(0,t);
+        g.gain.linearRampToValueAtTime(amp,t+.025);
+        g.gain.setValueAtTime(amp,t+Math.max(.03,dur-.06));
+        g.gain.linearRampToValueAtTime(0,t+dur);
+        oscQ.connect(g);g.connect(rxMaster);oscQ.start(t);oscQ.stop(t+dur+.03);
+      }
+      scheduleQrm();
     },delay);
   }
 
@@ -561,7 +590,7 @@
     wfKeyUp('LOCAL');
     $('#txFlag').textContent='RX'; $('#txFlag').classList.remove('tx');
     $('#keybar').classList.remove('down');
-    $('#keybar').textContent=keyMode==='STRAIGHT'?'SPACE / CTRL / [ ] / MOUSE · KEY':(iambicMode==='BUG'?'PADDLE · BUG':'PADDLE · IAMBIC '+iambicMode);
+    $('#keybar').textContent=keyMode==='STRAIGHT'?'SPACE / CTRL / [ ] / TOUCH · KEY':(iambicMode==='BUG'?'PADDLE · BUG':'PADDLE · IAMBIC '+iambicMode);
     updateSmeter();
     ramp(0,5);
     txRxSwitchUp();
@@ -675,7 +704,8 @@
   }
 
   function isEditing(){
-    return document.activeElement && ['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement.tagName);
+    const el=document.activeElement;
+    return !!(el && (el.isContentEditable || ['INPUT','SELECT','TEXTAREA'].includes(el.tagName)));
   }
   function directPress(token){
     if(directHeld.has(token)) return;
@@ -767,13 +797,33 @@
     }
   });
 
-  $('#keybar').addEventListener('pointerdown',e=>{
+  const keybar=$('#keybar');
+  keybar.addEventListener('contextmenu',e=>e.preventDefault());
+  keybar.addEventListener('dragstart',e=>e.preventDefault());
+  keybar.addEventListener('selectstart',e=>e.preventDefault());
+  keybar.addEventListener('pointerdown',e=>{
     e.preventDefault();
-    $('#keybar').setPointerCapture(e.pointerId);
+    try{keybar.setPointerCapture(e.pointerId)}catch{}
     directPress('POINTER_'+e.pointerId);
   });
-  $('#keybar').addEventListener('pointerup',e=>directRelease('POINTER_'+e.pointerId));
-  $('#keybar').addEventListener('pointercancel',e=>directRelease('POINTER_'+e.pointerId));
+  const releasePointer=e=>{
+    e.preventDefault();
+    directRelease('POINTER_'+e.pointerId);
+    try{if(keybar.hasPointerCapture(e.pointerId))keybar.releasePointerCapture(e.pointerId)}catch{}
+  };
+  keybar.addEventListener('pointerup',releasePointer);
+  keybar.addEventListener('pointercancel',releasePointer);
+  keybar.addEventListener('lostpointercapture',e=>directRelease('POINTER_'+e.pointerId));
+  window.addEventListener('blur',()=>{
+    directHeld.clear();paddleDit=false;paddleDah=false;manualDahDown=false;
+    stopKeyerLoop(true);if(tx)keyUp();
+  });
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){
+      directHeld.clear();paddleDit=false;paddleDah=false;manualDahDown=false;
+      stopKeyerLoop(true);if(tx)keyUp();
+    }
+  });
 
 
   // -------- Realtime-ready waterfall event model --------
@@ -986,7 +1036,7 @@
       $('#prop').textContent=(spaceWeather.kp==null&&spaceWeather.sfi==null)
         ?'NOAA · UNAVAILABLE'
         :`Kp ${spaceWeather.kp?.toFixed(1)??'–'} · SFI ${spaceWeather.sfi??'–'}`;
-      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn();
+      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn(); scheduleQrm();
       return;
     }
     if(m.type==='qso_complete'){
@@ -1072,7 +1122,7 @@
   function signalLevel(st){
     const p=Math.max(1,st.power||10);
     const powerDb=10*Math.log10(p/10);
-    const bandBase={80:.25,40:.28,20:.27,15:.25,10:.23}[band]||.25;
+    const bandBase={40:.28,20:.27,15:.25,10:.23}[band]||.25;
     const seed=((st.stationId||'x').split('').reduce((a,c)=>a+c.charCodeAt(0),0)%17)/110;
     return Math.max(.02,Math.min(.78,(bandBase+seed+powerDb/95)*antennaFactor(st)*propagationFactor(st)));
   }
@@ -1195,14 +1245,24 @@
   }
   function updateSmeter(){
     let strongest=0;
-    for(const [id,v] of remoteVoices){ if(!v.down) continue; const st=remoteStations.get(id); if(st) strongest=Math.max(strongest,receiveGainFor(st)); }
+    for(const [id,v] of remoteVoices){
+      if(!v.down) continue;
+      const st=remoteStations.get(id);
+      if(st) strongest=Math.max(strongest,receiveGainFor(st));
+    }
     const bw=+$('#filter').value;
-    const nr=$('#nr').classList.contains('active')?.55:1;
-    const noise=({80:.15,40:.12,20:.075,15:.052,10:.038}[band]||.07)*({600:.58,1800:.88,2500:1}[bw]||1)*nr;
-    const level=Math.min(1,noise+strongest);
-    $('#sfill').style.width=(4+level*92)+'%';
-    const s=Math.max(1,Math.min(9,Math.round(level*10)));
-    $('#sigText').textContent=strongest>.02?'S'+s:'S'+Math.max(1,Math.round(noise*10));
+    const nrOn=$('#nr').classList.contains('active');
+    const nbOn=$('#nb').classList.contains('active');
+    const baseS={40:4.5,20:3.5,15:2.5,10:1.5}[band]||2.5;
+    const bwFactor={600:.76,1800:.92,2500:1}[bw]||1;
+    const nrFactor=nrOn?.67:1;
+    // Slight live movement makes the floor feel like RF rather than a fixed graphic.
+    const flutter=(Math.sin(performance.now()/1350)+Math.sin(performance.now()/730))*0.14;
+    const noiseS=Math.max(1,Math.min(9,baseS*bwFactor*nrFactor+flutter));
+    const signalS=Math.max(noiseS,Math.min(9,noiseS+strongest*8.2));
+    const displayS=Math.max(1,Math.min(9,Math.round(signalS)));
+    $('#sfill').style.width=(6+(signalS/9)*78)+'%';
+    $('#sigText').textContent='S'+displayS;
   }
   function startMeter(){ if(meterTimer) return; meterTimer=setInterval(()=>{refreshRemoteVoices();updateSmeter();},120); }
 
