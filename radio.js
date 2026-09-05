@@ -47,7 +47,7 @@
   let rxMaster=null, rxGate=null, noiseGain=null, noiseSource=null, noiseBandpass=null;
   let meterTimer=null, qrnTimer=null, qrnBuffer=null;
   let audioUnlocked=false;
-  let rxReturnTimer=null;
+  let rxReturnTimer=null,rxHoldActive=false;
   const directHeld=new Set();
   const decoderStates=new Map();
   const MORSE_DECODE={
@@ -149,7 +149,6 @@
     clampHz();
     redraw();
     scheduleStateSend(true);
-    log('Waterfall tune: '+(hz/1e6).toFixed(6)+' MHz.');
   });
   $('#dial').addEventListener('wheel', e=>{
     e.preventDefault();
@@ -302,7 +301,7 @@
   $('#reverse').onclick=()=>{
     if(keyMode!=='PADDLE') return;
     $('#reverse').classList.toggle('active');
-    $('#reverse').textContent=$('#reverse').classList.contains('active')?'REV · ON':'REV · NORMAL';
+    $('#reverse').textContent='REVERSE';
   };
   $('#iambicMode').onclick=()=>{
     if(keyMode!=='PADDLE') return;
@@ -617,26 +616,39 @@
     rxGate.gain.cancelScheduledValues(t);
     rxGate.gain.setTargetAtTime(open?1:0,t,Math.max(.002,ms/1000));
   }
+  function setTxRxUi(isTx){
+    rxHoldActive=!!isTx;
+    $('#txFlag').textContent=isTx?'TX':'RX';
+    $('#txFlag').classList.toggle('tx',isTx);
+    if(!isTx) updateSmeter();
+  }
   function txRxSwitchDown(){
     clearTimeout(rxReturnTimer);
+    setTxRxUi(true);
     const mode=$('#breakin').value;
     if(mode==='QSK') setRxGate(false,2);
-    else if(mode==='SEMI') setRxGate(false,4);
-    else setRxGate(false,4);
+    else setRxGate(false,5);
   }
   function txRxSwitchUp(){
     clearTimeout(rxReturnTimer);
     const mode=$('#breakin').value;
-    if(mode==='QSK'){ setRxGate(true,2); return; }
+    if(mode==='QSK'){
+      setRxGate(true,3);
+      setTxRxUi(false);
+      return;
+    }
     const hold=mode==='SEMI' ? +$('#delay').value : 1000;
-    rxReturnTimer=setTimeout(()=>setRxGate(true,8),hold);
+    // Stay visibly in TX and keep RX muted for the selected hang time.
+    rxReturnTimer=setTimeout(()=>{
+      setRxGate(true,18);
+      setTxRxUi(false);
+    },hold);
   }
   function keyDown(){
     if(tx) return;
     tx=true; lastKeyDown=performance.now(); txStartMs=Date.now();
     txRxSwitchDown();
     wfKeyDown('LOCAL',hz,'human');
-    $('#txFlag').textContent='TX'; $('#txFlag').classList.add('tx');
     $('#keybar').classList.add('down'); $('#keybar').textContent='TX · KEY DOWN';
     $('#sfill').style.width='3%'; $('#sigText').textContent='TX';
     ramp((+$('#sideVol').value/100)*0.28,4);
@@ -647,10 +659,8 @@
     tx=false;
     if(txStartMs){ txAccumMs+=Date.now()-txStartMs; txStartMs=0; }
     wfKeyUp('LOCAL');
-    $('#txFlag').textContent='RX'; $('#txFlag').classList.remove('tx');
     $('#keybar').classList.remove('down');
     $('#keybar').textContent=keyMode==='STRAIGHT'?'SPACE / CTRL / [ ] / TOUCH · KEY':(iambicMode==='BUG'?'PADDLE · BUG':'PADDLE · IAMBIC '+iambicMode);
-    updateSmeter();
     ramp(0,5);
     txRxSwitchUp();
     sendNet({type:'key_up', band, hz, seq:++netSeq, t:Date.now()});
@@ -1191,12 +1201,16 @@
     if(st.band!==band) return 0;
     const df=Math.abs((st.hz||0)-hz);
     const capture=filterCaptureHz();
-    if(df>=capture) return 0;
-    const flat=capture*.72;
+    // Receiver skirts rather than a digital brick wall. You now hear a station
+    // rise progressively as the VFO approaches it and fade away past the edge.
+    const core=capture*.12;
+    const outer=capture*1.48;
+    if(df>=outer) return 0;
     let pass=1;
-    if(df>flat){
-      const x=(df-flat)/(capture-flat);
+    if(df>core){
+      const x=(df-core)/(outer-core);
       pass=.5*(1+Math.cos(Math.PI*x));
+      pass=Math.pow(pass,1.18);
     }
     return signalLevel(st)*pass;
   }
@@ -1267,8 +1281,10 @@
     for(const timer of p.timers||[])clearTimeout(timer);
     try{
       const t=audioCtx?.currentTime||0;
-      p.gain?.gain.cancelScheduledValues(t);
-      p.gain?.gain.setValueAtTime(0,t);
+      p.markGain?.gain.cancelScheduledValues(t);
+      p.markGain?.gain.setValueAtTime(0,t);
+      p.tuneGain?.gain.cancelScheduledValues(t);
+      p.tuneGain?.gain.setValueAtTime(0,t);
       p.osc?.stop(t+.01);
     }catch{}
     cwFramePlaybacks.delete(id);
@@ -1282,23 +1298,26 @@
     stopFramePlayback(m.stationId);
 
     const oscF=audioCtx.createOscillator();oscF.type='sine';
-    const g=audioCtx.createGain();g.gain.value=0;
-    oscF.connect(g);g.connect(rxMaster);
+    const markGain=audioCtx.createGain();markGain.gain.value=0;
+    const tuneGain=audioCtx.createGain();tuneGain.gain.value=0;
+    oscF.connect(markGain);markGain.connect(tuneGain);tuneGain.connect(rxMaster);
 
     const offset=(m.hz||hz)-hz;
     const f=Math.max(160,Math.min(1800,+$('#tone').value+offset));
     oscF.frequency.value=f;
 
-    // Small jitter buffer. Once scheduled, timing is governed by WebAudio's
-    // sample clock rather than JS/WebSocket arrival timing.
+    // Small jitter buffer. The keying envelope is sample-clock accurate.
+    // Receiver tuning is a separate continuously adjustable gain stage.
     const lead=.16;
     const t0=audioCtx.currentTime+lead;
-    const amp=Math.max(0,receiveGainFor(st))*qsbFactor({qsbRate:.07,qsbPhase:0});
     const attack=.0025,release=.0035;
     const timers=[];
+    const qsb={qsbRate:.055+Math.random()*.055,qsbPhase:Math.random()*Math.PI*2};
+    const initialAmp=Math.max(0,receiveGainFor(st))*qsbFactor(qsb);
+    tuneGain.gain.setValueAtTime(initialAmp,t0);
 
-    g.gain.cancelScheduledValues(t0);
-    g.gain.setValueAtTime(0,t0);
+    markGain.gain.cancelScheduledValues(t0);
+    markGain.gain.setValueAtTime(0,t0);
 
     let markOpen=false;
     for(const item of m.events){
@@ -1306,11 +1325,11 @@
       const at=Math.max(0,Number(item[0])||0)/1000;
       const down=!!item[1],tt=t0+at;
       if(down){
-        g.gain.setValueAtTime(0,tt);
-        g.gain.linearRampToValueAtTime(amp,tt+attack);
+        markGain.gain.setValueAtTime(0,tt);
+        markGain.gain.linearRampToValueAtTime(1,tt+attack);
       }else{
-        g.gain.setValueAtTime(amp,tt);
-        g.gain.linearRampToValueAtTime(0,tt+release);
+        markGain.gain.setValueAtTime(1,tt);
+        markGain.gain.linearRampToValueAtTime(0,tt+release);
       }
 
       // Visual waterfall + optional decoder can tolerate ordinary JS timers;
@@ -1337,7 +1356,7 @@
       updateSmeter();
     },lead*1000+duration*1000+120);
     timers.push(cleanup);
-    cwFramePlaybacks.set(m.stationId,{osc:oscF,gain:g,timers,until:performance.now()+lead*1000+duration*1000,st});
+    cwFramePlaybacks.set(m.stationId,{osc:oscF,markGain,tuneGain,qsb,timers,until:performance.now()+lead*1000+duration*1000,st});
   }
 
   function remoteKeyDown(m){
@@ -1376,13 +1395,23 @@
   }
   function refreshRemoteVoices(){
     if(!audioCtx) return;
+    const now=audioCtx.currentTime;
     for(const [id,v] of remoteVoices){
       const st=remoteStations.get(id); if(!st||!v.down) continue;
       const offset=(st.hz||hz)-hz;
-      v.osc.frequency.setTargetAtTime(Math.max(160,Math.min(1800,+$('#tone').value+offset)),audioCtx.currentTime,.006);
-      v.gain.gain.setTargetAtTime(receiveGainFor(st)*qsbFactor(v),audioCtx.currentTime,.04);
+      v.osc.frequency.setTargetAtTime(Math.max(160,Math.min(1800,+$('#tone').value+offset)),now,.012);
+      v.gain.gain.setTargetAtTime(receiveGainFor(st)*qsbFactor(v),now,.075);
+    }
+    for(const p of cwFramePlaybacks.values()){
+      const st=p.st;if(!st||performance.now()>=(p.until||0))continue;
+      const offset=(st.hz||hz)-hz;
+      p.osc?.frequency.setTargetAtTime(Math.max(160,Math.min(1800,+$('#tone').value+offset)),now,.018);
+      const target=Math.max(0,receiveGainFor(st))*qsbFactor(p.qsb||{});
+      // Slow receiver/AGC-like response makes tuning through a signal natural.
+      p.tuneGain?.gain.setTargetAtTime(target,now,target>(p.tuneGain?.gain.value||0)?.055:.12);
     }
   }
+  let smeterAgc=0;
   function updateSmeter(){
     let strongest=0;
     for(const [id,v] of remoteVoices){
@@ -1402,9 +1431,18 @@
     // Slight live movement makes the floor feel like RF rather than a fixed graphic.
     const flutter=(Math.sin(performance.now()/1350)+Math.sin(performance.now()/730))*0.14;
     const noiseS=Math.max(1,Math.min(9,baseS*bwFactor*nrFactor+flutter));
-    const signalS=Math.max(noiseS,Math.min(9,noiseS+strongest*8.2));
-    const displayS=Math.max(1,Math.min(9,Math.round(signalS)));
-    $('#sfill').style.width=(6+(signalS/9)*78)+'%';
+    const targetS=Math.max(noiseS,Math.min(9,noiseS+strongest*8.2));
+    if(rxHoldActive){
+      $('#sfill').style.width='3%';
+      $('#sigText').textContent='TX';
+      return;
+    }
+    if(!smeterAgc)smeterAgc=noiseS;
+    const coeff=targetS>smeterAgc?.30:.075;
+    smeterAgc += (targetS-smeterAgc)*coeff;
+    if(Math.abs(smeterAgc-noiseS)<.03)smeterAgc=noiseS;
+    const displayS=Math.max(1,Math.min(9,Math.round(smeterAgc)));
+    $('#sfill').style.width=(6+(smeterAgc/9)*78)+'%';
     $('#sigText').textContent='S'+displayS;
   }
   function startMeter(){ if(meterTimer) return; meterTimer=setInterval(()=>{refreshRemoteVoices();updateSmeter();},120); }
