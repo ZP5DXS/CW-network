@@ -33,7 +33,7 @@ function activityLevel(b){const now=Date.now(),a=(recentBandTx.get(b)||[]).filte
 function presence(){const activity={};for(const b of VALID_BANDS)activity[b]=activityLevel(b);broadcast({type:'presence',online:clients.size,activity})}
 function sanitizeState(m,prev={}){
  const band=VALID_BANDS.has(+m.band)?+m.band:(prev.band||40),[lo,hi]=BAND_LIMITS[band];
- return {...prev,callsign:safeText(m.callsign||prev.callsign||'',16),locator:safeText(m.locator||prev.locator||'',10),visitorId:String(m.visitorId||prev.visitorId||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,80),band,
+ return {...prev,callsign:safeText(m.callsign||prev.callsign||'',16),locator:safeText(m.locator||prev.locator||'',10),visitorId:String(m.visitorId||prev.visitorId||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,80),sessionId:String(m.sessionId||prev.sessionId||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,96),band,
  hz:clamp(Math.round(Number(m.hz)||((lo+hi)/2)),lo,hi),power:clamp(Math.round(Number(m.power)||10),1,100),
  antenna:+m.antenna===1?1:2,azimuth:((Math.round(Number(m.azimuth)||0)%360)+360)%360,
  wpm:clamp(Math.round(Number(m.wpm)||15),5,45),keyMode:m.keyMode==='PADDLE'?'PADDLE':'STRAIGHT',
@@ -60,7 +60,7 @@ const AI_HISTORY_LIMIT=50;
 const SUPABASE_URL=String(process.env.SUPABASE_URL||'').replace(/\/$/,'');
 const SUPABASE_SERVICE_ROLE_KEY=String(process.env.SUPABASE_SERVICE_ROLE_KEY||'').trim();
 const STATS_DB_READY=!!(SUPABASE_URL&&SUPABASE_SERVICE_ROLE_KEY);
-let statsCache={users:0,countries:0,usage_seconds:0,likes:0,qsos:0,qso_bot:0,qso_human:0,avg_wpm:0,qrs:0,qrq:0,max_distance_km:0,top_callsigns:[],persistent:STATS_DB_READY};
+let statsCache={visits:0,unique_users:0,countries:0,usage_seconds:0,likes:0,qsos:0,qso_bot:0,qso_human:0,avg_wpm:0,qrs:0,qrq:0,max_distance_km:0,top_callsigns:[],persistent:STATS_DB_READY};
 const countryCache=new Map(),humanQsoPairs=new Map(),humanQsoCompleted=new Map();
 
 async function supabaseRpc(fn,body={}){
@@ -70,14 +70,14 @@ async function supabaseRpc(fn,body={}){
  const txt=await r.text();try{return txt?JSON.parse(txt):null}catch{return txt}
 }
 async function refreshStatsCache(){
- if(!STATS_DB_READY){statsCache={...statsCache,users:new Set([...clients.values()].map(s=>s.visitorId).filter(Boolean)).size,persistent:false};broadcast({type:'stats',...statsCache});return;}
+ if(!STATS_DB_READY){statsCache={...statsCache,persistent:false};broadcast({type:'stats',...statsCache});return;}
  try{const data=await supabaseRpc('cwn_get_stats',{});if(data&&typeof data==='object')statsCache={...statsCache,...data,persistent:true};broadcast({type:'stats',...statsCache});}
  catch(err){console.error('stats refresh:',err?.message||err)}
 }
 function clientIp(req){const x=String(req.headers['x-forwarded-for']||'').split(',')[0].trim();return x||String(req.socket?.remoteAddress||'').replace(/^::ffff:/,'')}
 async function countryForIp(ip){
  if(!ip||ip==='127.0.0.1'||ip==='::1')return {code:'',name:''};if(countryCache.has(ip))return countryCache.get(ip);
- let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.40'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
+ let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.41'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
  countryCache.set(ip,out);setTimeout(()=>countryCache.delete(ip),6*60*60*1000);return out;
 }
 function maidenheadToLatLonServer(locator){
@@ -92,6 +92,21 @@ function distanceKmLoc(a,b){
  const A=maidenheadToLatLonServer(a),B=maidenheadToLatLonServer(b);if(!A||!B)return null;
  const R=6371,rad=x=>x*Math.PI/180,dLat=rad(B.lat-A.lat),dLon=rad(B.lon-A.lon),h=Math.sin(dLat/2)**2+Math.cos(rad(A.lat))*Math.cos(rad(B.lat))*Math.sin(dLon/2)**2;
  return Math.round(R*2*Math.atan2(Math.sqrt(h),Math.sqrt(1-h)));
+}
+async function startVisit(state){
+ if(!state?.visitorId||!state?.sessionId||state.visitCounted||!STATS_DB_READY)return;
+ state.visitCounted=true;
+ try{
+  await supabaseRpc('cwn_start_visit',{
+   p_visitor_id:state.visitorId,p_session_id:state.sessionId,
+   p_country_code:state.countryCode||'',p_country:state.country||'',
+   p_callsign:state.callsign||'',p_locator:state.locator||''
+  });
+  await refreshStatsCache();
+ }catch(err){
+  state.visitCounted=false;
+  console.error('start visit:',err?.message||err);
+ }
 }
 async function touchVisitor(state,usageSeconds=0){
  if(!state?.visitorId||!STATS_DB_READY)return;
@@ -252,7 +267,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.40',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.41',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -853,7 +868,7 @@ const server=http.createServer(async(req,res)=>{
  if(urlObj.pathname==='/stats'){sendJson(res,200,{ok:true,...statsCache});return;}
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.40',
+   ok:true,service:'CW Network',version:'0.41',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -895,13 +910,13 @@ const server=http.createServer(async(req,res)=>{
 const wss=new WebSocketServer({server,maxPayload:16*1024});
 wss.on('connection',(ws,req)=>{
  const stationId=id('u');
- const state={stationId,kind:'human',visitorId:'',countryCode:'',country:'',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),keyDown:false,rate:null,decoder:null,missedPongs:0};
- clients.set(ws,state);ws.isAlive=true;send(ws,{type:'welcome',stationId,serverTime:Date.now()});send(ws,spaceWeather);send(ws,{type:'stats',...statsCache});snapshotFor(ws);presence();rebalanceBots();countryForIp(clientIp(req)).then(c=>{state.countryCode=c.code;state.country=c.name;if(state.visitorId)touchVisitor(state,0)});
+ const state={stationId,kind:'human',visitorId:'',sessionId:'',visitCounted:false,countryCode:'',country:'',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),keyDown:false,rate:null,decoder:null,missedPongs:0};
+ clients.set(ws,state);ws.isAlive=true;send(ws,{type:'welcome',stationId,serverTime:Date.now()});send(ws,spaceWeather);send(ws,{type:'stats',...statsCache});snapshotFor(ws);presence();rebalanceBots();countryForIp(clientIp(req)).then(c=>{state.countryCode=c.code;state.country=c.name;if(state.visitorId){touchVisitor(state,0);startVisit(state)}});
  ws.on('pong',()=>{ws.isAlive=true;state.missedPongs=0;state.lastSeen=Date.now()});
  ws.on('message',buf=>{
   state.lastSeen=Date.now();if(buf.length>16*1024)return ws.close(1009,'payload');
   let m;try{m=JSON.parse(buf.toString())}catch{return}if(!rateOK(state,m.type))return;const now=Date.now();
-  if(m.type==='station_state'){const old=JSON.stringify(publicState(state)),next=sanitizeState(m,state);next.stationId=stationId;next.kind='human';Object.assign(state,next);if(state.visitorId)touchVisitor(state,0);if(old!==JSON.stringify(publicState(state)))broadcast({type:'station_state',...publicState(state)},ws);return}
+  if(m.type==='station_state'){const old=JSON.stringify(publicState(state)),next=sanitizeState(m,state);next.stationId=stationId;next.kind='human';Object.assign(state,next);if(state.visitorId){startVisit(state);touchVisitor(state,0)}if(old!==JSON.stringify(publicState(state)))broadcast({type:'station_state',...publicState(state)},ws);return}
   if(m.type==='stats_like'){if(m.visitorId&&!state.visitorId)state.visitorId=String(m.visitorId).replace(/[^a-zA-Z0-9_-]/g,'').slice(0,80);recordLikeStat(state,!!m.liked);return}
   if(m.type==='key_down'){if(state.keyDown)return;state.keyDown=true;const [lo,hi]=BAND_LIMITS[state.band];state.hz=clamp(Math.round(Number(m.hz)||state.hz),lo,hi);serverKeyDown(state,now);recordTx(state.band);broadcastBand(state.band,{type:'key_down',stationId,kind:'human',band:state.band,hz:state.hz,power:state.power,callsign:state.callsign,locator:state.locator,seq:++serverSeq,t:now},ws);return}
   if(m.type==='key_up'){if(!state.keyDown)return;state.keyDown=false;serverKeyUp(state,now);broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:now},ws);return}
@@ -929,7 +944,7 @@ async function refreshSpaceWeather(){
 }
 refreshSpaceWeather();setInterval(refreshSpaceWeather,15*60*1000);
 setInterval(presence,5000);
-setInterval(()=>{for(const state of clients.values())touchVisitor(state,30)},30000);
+setInterval(async()=>{await Promise.all([...clients.values()].map(state=>touchVisitor(state,30)));await refreshStatsCache()},30000);
 setInterval(refreshStatsCache,15000);setTimeout(refreshStatsCache,2200);
 setInterval(()=>{
  for(const [ws,state] of clients){
@@ -944,4 +959,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.40 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.41 listening on ${PORT}`));

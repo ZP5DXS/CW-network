@@ -22,8 +22,7 @@
   let sessionStarted=Date.now(), txAccumMs=0, txStartMs=0, qsoCount=0;
   const bandsUsed=new Set([40]);
   let liked=localStorage.getItem('cwNetLiked')==='1';
-  let likeCount=Number(localStorage.getItem('cwNetLikeCount')||0);
-  const SERVICE_CALL='CWN';
+    const SERVICE_CALL='CWN';
   const serviceFreqByBand={40:7031500,20:14026500,15:21026500,10:28021500};
   const npcTemplates=[
     {call:'K1VRT',role:'DX',wpm:24,style:'PADDLE',offset:2100},
@@ -1223,6 +1222,10 @@
     catch(_){visitorId='v_'+Date.now()+'_'+Math.random().toString(36).slice(2);}
     localStorage.setItem(VISITOR_STORAGE_KEY,visitorId);
   }
+  // One fresh ID per page load. A reload is a new visit; reconnects in the same page are not.
+  let visitSessionId='';
+  try{visitSessionId=(crypto.randomUUID?crypto.randomUUID():'s_'+Date.now()+'_'+Math.random().toString(36).slice(2));}
+  catch(_){visitSessionId='s_'+Date.now()+'_'+Math.random().toString(36).slice(2);}
   function normalizedStationIdentity(){
     return {callsign:($('#callsign').value||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,16),
             locator:($('#locator').value||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,10)};
@@ -1266,7 +1269,7 @@
   function stationPayload(){
     return {
       type:'station_state', band, hz, callsign:($('#callsign').value||'').trim().toUpperCase().slice(0,16),
-      locator:($('#locator').value||'').trim().toUpperCase().slice(0,10), visitorId, power:+$('#power').value,
+      locator:($('#locator').value||'').trim().toUpperCase().slice(0,10), visitorId, sessionId:visitSessionId, power:+$('#power').value,
       antenna, azimuth:Math.round(rotorActual), wpm:+$('#wpm').value, keyMode, iambicMode
     };
   }
@@ -1720,7 +1723,7 @@
   function fmtHours(sec){const h=(Number(sec)||0)/3600;return h<100?h.toFixed(1)+' h':Math.round(h)+' h';}
   function renderGlobalStats(s={}){
     globalStats={...globalStats,...s};
-    if(s.users!=null)$('#visitStat').textContent=Number(s.users).toLocaleString();
+    if(s.visits!=null)$('#visitStat').textContent=Number(s.visits).toLocaleString();
     if(s.countries!=null)$('#countryStat').textContent=Number(s.countries).toLocaleString();
     if(s.usage_seconds!=null)$('#usageStat').textContent=fmtHours(s.usage_seconds);
     if(s.qsos!=null)$('#qsoStat').textContent=Number(s.qsos).toLocaleString();
