@@ -278,7 +278,7 @@
     btn.classList.add('active');
     band=nextBand; hz=bands[band].center; redraw();
     $('#bandActivity').textContent=band+'M · …';
-    updateNoiseLevel(); scheduleQrn(); resetDecoder();
+    updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); resetDecoder();
     bandsUsed.add(band);
     $('#bandsUsedStat').textContent=bandsUsed.size;
     updateServiceUI();
@@ -472,6 +472,7 @@
     updateNoiseLevel();
     scheduleQrn();
     scheduleQrm();
+    scheduleStatic();
   }
 
   function filterCaptureHz(){
@@ -516,31 +517,89 @@
     },delay);
   }
 
-  let qrmTimer=null;
+  let qrmTimer=null,staticTimer=null;
   function scheduleQrm(){
     clearTimeout(qrmTimer);
     if(!audioCtx)return;
-    const rate={40:1.0,20:.65,15:.38,10:.22}[band]||.4;
-    const delay=(4500+Math.random()*9000)/rate;
+    // QRM = other RF users/carriers. Keep it sparse; the static layer below
+    // provides most of the "alive band" texture.
+    const rate={40:1.0,20:.62,15:.34,10:.18}[band]||.35;
+    const delay=(6500+Math.random()*13500)/Math.max(.15,rate);
     qrmTimer=setTimeout(()=>{
       if(audioCtx&&rxMaster){
         const oscQ=audioCtx.createOscillator();
         const g=audioCtx.createGain();
-        const offset=(Math.random()<.5?-1:1)*(90+Math.random()*360);
-        oscQ.type='sine';
-        oscQ.frequency.value=Math.max(220,(+$('#tone').value)+offset);
+        const offset=(Math.random()<.5?-1:1)*(110+Math.random()*470);
+        oscQ.type=Math.random()<.82?'sine':'triangle';
+        oscQ.frequency.value=Math.max(180,(+$('#tone').value)+offset);
         const nb=$('#nb').classList.contains('active');
         const nr=$('#nr').classList.contains('active');
-        const bandAmp={40:.060,20:.042,15:.027,10:.018}[band]||.025;
-        const amp=bandAmp*(nb?.58:1)*(nr?.72:1);
-        const t=audioCtx.currentTime,dur=.18+Math.random()*.55;
-        g.gain.setValueAtTime(0,t);
-        g.gain.linearRampToValueAtTime(amp,t+.025);
-        g.gain.setValueAtTime(amp,t+Math.max(.03,dur-.06));
-        g.gain.linearRampToValueAtTime(0,t+dur);
-        oscQ.connect(g);g.connect(rxMaster);oscQ.start(t);oscQ.stop(t+dur+.03);
+        const bandAmp={40:.050,20:.034,15:.022,10:.014}[band]||.022;
+        const amp=bandAmp*(nr?.75:1);
+        const t=audioCtx.currentTime;
+        // Sometimes a brief heterodyne, sometimes a few crude CW-like chops.
+        if(Math.random()<.45){
+          const dur=.28+Math.random()*1.3;
+          g.gain.setValueAtTime(0,t);
+          g.gain.linearRampToValueAtTime(amp,t+.025);
+          g.gain.setValueAtTime(amp,t+Math.max(.04,dur-.05));
+          g.gain.linearRampToValueAtTime(0,t+dur);
+          oscQ.start(t);oscQ.stop(t+dur+.03);
+        }else{
+          let tt=t;const unit=.045+Math.random()*.055;
+          g.gain.setValueAtTime(0,tt);
+          for(let i=0;i<3+Math.floor(Math.random()*6);i++){
+            const mark=(Math.random()<.68?1:3)*unit;
+            g.gain.setValueAtTime(0,tt);
+            g.gain.linearRampToValueAtTime(amp,tt+.003);
+            g.gain.setValueAtTime(amp,tt+Math.max(.004,mark-.004));
+            g.gain.linearRampToValueAtTime(0,tt+mark);
+            tt+=mark+unit*(1+Math.floor(Math.random()*2));
+          }
+          oscQ.start(t);oscQ.stop(tt+.03);
+        }
+        oscQ.connect(g);g.connect(rxMaster);
       }
       scheduleQrm();
+    },delay);
+  }
+
+  function scheduleStatic(){
+    clearTimeout(staticTimer);
+    if(!audioCtx)return;
+    // Fast random impulse texture: electrical clicks, atmospheric crackle,
+    // tiny pops. Strongest and most frequent on 40 m.
+    const density={40:1.8,20:1.15,15:.72,10:.42}[band]||.7;
+    const delay=(180+Math.random()*1050)/density;
+    staticTimer=setTimeout(()=>{
+      if(audioCtx&&rxMaster){
+        const nb=$('#nb').classList.contains('active');
+        const nr=$('#nr').classList.contains('active');
+        const cluster=Math.random()<.26?2+Math.floor(Math.random()*4):1;
+        for(let c=0;c<cluster;c++){
+          const dur=.004+Math.random()*(Math.random()<.18?.045:.018);
+          const len=Math.max(64,Math.floor(audioCtx.sampleRate*dur));
+          const buf=audioCtx.createBuffer(1,len,audioCtx.sampleRate);
+          const d=buf.getChannelData(0);
+          let last=0;
+          for(let i=0;i<len;i++){
+            const white=(Math.random()*2-1);
+            // high-passed-ish crackle: emphasize abrupt transitions
+            const hp=white-last*.72;last=white;
+            const env=Math.exp(-i/(len*(.12+Math.random()*.12)));
+            d[i]=hp*env;
+          }
+          const src=audioCtx.createBufferSource();src.buffer=buf;
+          const hp=audioCtx.createBiquadFilter();hp.type='highpass';hp.frequency.value=500+Math.random()*1600;
+          const g=audioCtx.createGain();
+          const base={40:.13,20:.085,15:.052,10:.030}[band]||.05;
+          g.gain.value=base*(.5+Math.random()*.9)*(nb?.18:1)*(nr?.72:1);
+          src.connect(hp);hp.connect(g);g.connect(rxMaster);
+          const when=audioCtx.currentTime+c*(.018+Math.random()*.055);
+          src.start(when);
+        }
+      }
+      scheduleStatic();
     },delay);
   }
 
@@ -992,6 +1051,7 @@
     sock.onclose=()=>{
       if(generation!==socketGeneration) return;
       silenceAllRemoteVoices('socket close');
+      for(const id of [...cwFramePlaybacks.keys()])stopFramePlayback(id);
       $('#netState').textContent='RECONNECTING';
       log('Network connection lost. Reconnecting…');
       scheduleReconnect();
@@ -1028,6 +1088,7 @@
       remoteStations.delete(m.stationId); remoteKeyUp(m.stationId); return;
     }
     if(m.type==='activity' && m.message) { log(m.message); return; }
+    if(m.type==='cw_frame' && m.stationId!==stationId){ playCwFrame(m); return; }
     if(m.type==='key_down' && m.stationId!==stationId){ remoteKeyDown(m); return; }
     if(m.type==='key_up' && m.stationId!==stationId){ remoteKeyUp(m.stationId); return; }
     if(m.type==='space_weather'){
@@ -1036,7 +1097,7 @@
       $('#prop').textContent=(spaceWeather.kp==null&&spaceWeather.sfi==null)
         ?'NOAA · UNAVAILABLE'
         :`Kp ${spaceWeather.kp?.toFixed(1)??'–'} · SFI ${spaceWeather.sfi??'–'}`;
-      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn(); scheduleQrm();
+      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic();
       return;
     }
     if(m.type==='qso_complete'){
@@ -1200,6 +1261,85 @@
     },d.unit*6.2);
   }
 
+  const cwFramePlaybacks=new Map();
+  function stopFramePlayback(id){
+    const p=cwFramePlaybacks.get(id);if(!p)return;
+    for(const timer of p.timers||[])clearTimeout(timer);
+    try{
+      const t=audioCtx?.currentTime||0;
+      p.gain?.gain.cancelScheduledValues(t);
+      p.gain?.gain.setValueAtTime(0,t);
+      p.osc?.stop(t+.01);
+    }catch{}
+    cwFramePlaybacks.delete(id);
+    wfKeyUp(id);
+  }
+
+  function playCwFrame(m){
+    if(!ensureAudio()||!audioCtx||!Array.isArray(m.events))return;
+    const st={...(remoteStations.get(m.stationId)||{}),...m,keyDown:false};
+    remoteStations.set(m.stationId,st);
+    stopFramePlayback(m.stationId);
+
+    const oscF=audioCtx.createOscillator();oscF.type='sine';
+    const g=audioCtx.createGain();g.gain.value=0;
+    oscF.connect(g);g.connect(rxMaster);
+
+    const offset=(m.hz||hz)-hz;
+    const f=Math.max(160,Math.min(1800,+$('#tone').value+offset));
+    oscF.frequency.value=f;
+
+    // Small jitter buffer. Once scheduled, timing is governed by WebAudio's
+    // sample clock rather than JS/WebSocket arrival timing.
+    const lead=.16;
+    const t0=audioCtx.currentTime+lead;
+    const amp=Math.max(0,receiveGainFor(st))*qsbFactor({qsbRate:.07,qsbPhase:0});
+    const attack=.0025,release=.0035;
+    const timers=[];
+
+    g.gain.cancelScheduledValues(t0);
+    g.gain.setValueAtTime(0,t0);
+
+    let markOpen=false;
+    for(const item of m.events){
+      if(!Array.isArray(item)||item.length<2)continue;
+      const at=Math.max(0,Number(item[0])||0)/1000;
+      const down=!!item[1],tt=t0+at;
+      if(down){
+        g.gain.setValueAtTime(0,tt);
+        g.gain.linearRampToValueAtTime(amp,tt+attack);
+      }else{
+        g.gain.setValueAtTime(amp,tt);
+        g.gain.linearRampToValueAtTime(0,tt+release);
+      }
+
+      // Visual waterfall + optional decoder can tolerate ordinary JS timers;
+      // the AUDIO itself does not depend on them anymore.
+      const timer=setTimeout(()=>{
+        if(down){
+          wfKeyDown(m.stationId,m.hz,m.kind==='service'?'service':'human');
+          decoderKeyDown(st);
+        }else{
+          wfKeyUp(m.stationId);
+          decoderKeyUp(st);
+        }
+        updateSmeter();
+      },Math.max(0,lead*1000+(Number(item[0])||0)));
+      timers.push(timer);
+    }
+
+    const duration=Math.max(0,Number(m.duration)||0)/1000;
+    oscF.start(t0);
+    oscF.stop(t0+duration+.08);
+    const cleanup=setTimeout(()=>{
+      cwFramePlaybacks.delete(m.stationId);
+      wfKeyUp(m.stationId);
+      updateSmeter();
+    },lead*1000+duration*1000+120);
+    timers.push(cleanup);
+    cwFramePlaybacks.set(m.stationId,{osc:oscF,gain:g,timers,until:performance.now()+lead*1000+duration*1000,st});
+  }
+
   function remoteKeyDown(m){
     ensureAudio();
     const st={...(remoteStations.get(m.stationId)||{}),...m}; remoteStations.set(m.stationId,st);
@@ -1249,6 +1389,9 @@
       if(!v.down) continue;
       const st=remoteStations.get(id);
       if(st) strongest=Math.max(strongest,receiveGainFor(st));
+    }
+    for(const p of cwFramePlaybacks.values()){
+      if(performance.now()<(p.until||0)&&p.st)strongest=Math.max(strongest,receiveGainFor(p.st));
     }
     const bw=+$('#filter').value;
     const nrOn=$('#nr').classList.contains('active');

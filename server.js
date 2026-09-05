@@ -203,7 +203,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.31',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.32',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -306,9 +306,25 @@ function transmitVirtual(st,text,{service=false,after=null}={}){
  text=safeText(text,180).replace(/\s+/g,' ').trim();if(!text)return false;
  st.busy=true;st.lastText=text;st.history=(st.history||[]).concat(text).slice(-6);
  const {events,duration}=morseTimeline(text,st.wpm),kind=service?'service':'human';
- events.forEach(ev=>setTimeout(()=>{if(ev.down){st.keyDown=true;recordTx(st.band);broadcastBand(st.band,{type:'key_down',stationId:st.stationId,kind,band:st.band,hz:st.hz,power:st.power,callsign:st.callsign,locator:st.locator,seq:++serverSeq,t:Date.now()})}else{st.keyDown=false;broadcastBand(st.band,{type:'key_up',stationId:st.stationId,seq:++serverSeq,t:Date.now()})}},ev.at));
+
+ // v0.32: virtual CW is delivered as one deterministic timeline.
+ // The browser buffers it briefly and schedules every edge on the WebAudio clock.
+ // Network/event-loop jitter can therefore no longer stretch dits and dahs.
+ broadcastBand(st.band,{
+  type:'cw_frame',stationId:st.stationId,kind,band:st.band,hz:st.hz,power:st.power,
+  callsign:st.callsign,locator:st.locator,wpm:st.wpm,text,
+  events:events.map(e=>[Math.round(e.at),e.down?1:0]),
+  duration:Math.round(duration),seq:++serverSeq,t:Date.now()
+ });
+
+ // Keep objective server state for collision/activity logic, but do not stream
+ // these individual edges over the WebSocket.
+ events.forEach(ev=>setTimeout(()=>{
+  st.keyDown=!!ev.down;
+  if(ev.down)recordTx(st.band);
+ },ev.at));
  if(service)broadcastBand(st.band,{type:'service_text',band:st.band,hz:st.hz,text});
- setTimeout(()=>{st.busy=false;st.lastAction=Date.now();if(after)after()},duration+120);
+ setTimeout(()=>{st.keyDown=false;st.busy=false;st.lastAction=Date.now();if(after)after()},duration+120);
  return true;
 }
 function fallbackReply(bot,other,stage='QSO'){
@@ -600,7 +616,7 @@ const server=http.createServer(async(req,res)=>{
  const urlObj=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.31',
+   ok:true,service:'CW Network',version:'0.32',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -688,4 +704,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.31 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.32 listening on ${PORT}`));
