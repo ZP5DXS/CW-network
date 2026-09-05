@@ -1,10 +1,10 @@
 import { pipeline, env } from '@huggingface/transformers';
 
-const PRIMARY_MODEL=process.env.CWN_AI_MODEL||'onnx-community/SmolLM-135M-Instruct-ONNX';
+const PRIMARY_MODEL=process.env.CWN_AI_MODEL||'onnx-community/TinyStories-Instruct-33M-ONNX';
 const PRIMARY_DTYPE=(process.env.CWN_AI_DTYPE||'int8').toLowerCase();
-const MAX_RSS_MB=Math.max(160,Number(process.env.CWN_AI_MAX_RSS_MB)||320);
+const MAX_RSS_MB=Math.max(160,Number(process.env.CWN_AI_MAX_RSS_MB)||300);
 const CACHE_DIR=process.env.CWN_AI_CACHE_DIR||'.cache/transformers';
-const MAX_NEW_TOKENS=Math.max(8,Math.min(28,Number(process.env.CWN_AI_MAX_NEW_TOKENS)||20));
+const MAX_NEW_TOKENS=Math.max(8,Math.min(24,Number(process.env.CWN_AI_MAX_NEW_TOKENS)||18));
 const ALLOW_MODEL_FALLBACK=process.env.CWN_AI_MODEL_FALLBACK!=='0';
 let pipe=null,busy=false,shuttingDown=false,selectedModel=null,selectedDtype=null;
 let peakRssMB=0,inferences=0,bootStartedAt=Date.now();
@@ -37,8 +37,7 @@ async function boot(){
  const candidates=[{model:PRIMARY_MODEL,dtype:PRIMARY_DTYPE}];
  if(ALLOW_MODEL_FALLBACK){
   const fallbacks=[
-   {model:'onnx-community/SmolLM-135M-Instruct-ONNX',dtype:'int8'},
-   {model:'onnx-community/SmolLM2-135M-Instruct-ONNX',dtype:'int8'}
+   {model:'onnx-community/TinyStories-Instruct-33M-ONNX',dtype:'int8'}
   ];
   for(const c of fallbacks)if(!candidates.some(x=>x.model===c.model&&x.dtype===c.dtype))candidates.push(c);
  }
@@ -50,7 +49,7 @@ async function boot(){
    selectedModel=c.model;selectedDtype=c.dtype;
    post({type:'selected',model:selectedModel,dtype:selectedDtype,attempt:i+1});
    post({type:'state',state:'WARMING'});sendMemory();
-   const warmPrompt='CW ONLY. CALL K1TEST. REPLY TO ZP5DXS WITH RST 579 AND 73.';
+   const warmPrompt='Reply only with this short CW-style line: ZP5DXS DE K1TEST 579 73';
    await pipe(warmPrompt,{max_new_tokens:6,do_sample:false,return_full_text:false});
    sendMemory();
    post({type:'state',state:'READY',model:selectedModel,dtype:selectedDtype,bootMs:Date.now()-bootStartedAt});
@@ -77,8 +76,8 @@ process.on('message',async m=>{
   const out=await pipe(String(m.prompt||''),{
    max_new_tokens:MAX_NEW_TOKENS,
    do_sample:true,
-   temperature:.68,
-   top_p:.86,
+   temperature:.60,
+   top_p:.82,
    repetition_penalty:1.08,
    return_full_text:false
   });

@@ -48,13 +48,13 @@ function rateOK(state,type){
 }
 
 const SERVER_STARTED_AT=new Date().toISOString();
-const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/SmolLM-135M-Instruct-ONNX';
+const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/TinyStories-Instruct-33M-ONNX';
 const AI_REQUESTED_DTYPE=(process.env.CWN_AI_DTYPE||'int8').toLowerCase();
 const AI_DTYPE=['q4f16','fp16'].includes(AI_REQUESTED_DTYPE)?'int8':AI_REQUESTED_DTYPE;
 const AI_ENABLED=process.env.CWN_AI_ENABLED!=='0';
 const AI_DEBUG=process.env.CWN_AI_DEBUG==='1';
 const AI_LOAD_TIMEOUT_MS=clamp(Number(process.env.CWN_AI_LOAD_TIMEOUT_MS)||120000,30000,300000);
-const AI_MAX_RSS_MB=clamp(Number(process.env.CWN_AI_MAX_RSS_MB)||320,160,1024);
+const AI_MAX_RSS_MB=clamp(Number(process.env.CWN_AI_MAX_RSS_MB)||300,160,1024);
 let aiState=AI_ENABLED?'STARTING':'DISABLED',aiWorker=null,aiBusy=false,aiReqSeq=0,aiLastError='',aiReadyAt=null;
 let aiWorkerMemoryMB=null,aiWorkerHeapMB=null,aiWorkerPeakRssMB=null,aiWorkerStartedAt=null,aiWorkerLoadStartedAt=null,aiLoadProgress=null,aiLoadTimer=null;
 let aiSelectedModel=null,aiSelectedDtype=null,aiBootMs=null;const aiAttempts=[];
@@ -170,7 +170,7 @@ function requestAI(prompt,{timeout=7500,source='human',stage='QSO'}={}){
 function aiDebugSnapshot(full=false){
  const avg=aiStats.success?Math.round(aiStats.generationMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.28',state:aiState,enabled:AI_ENABLED,busy:aiBusy,queue:aiQueue.map(x=>({source:x.source,stage:x.stage})),
+  ok:true,service:'CW Network AI',version:'0.29',state:aiState,enabled:AI_ENABLED,busy:aiBusy,queue:aiQueue.map(x=>({source:x.source,stage:x.stage})),
   model:AI_MODEL,dtype:AI_DTYPE,requestedDtype:AI_REQUESTED_DTYPE,selectedModel:aiSelectedModel,selectedDtype:aiSelectedDtype,bootMs:aiBootMs,readyAt:aiReadyAt,error:aiLastError||null,
   worker:{pid:aiWorker?.pid||null,startedAt:aiWorkerStartedAt,loadStartedAt:aiWorkerLoadStartedAt,rssMB:aiWorkerMemoryMB,heapMB:aiWorkerHeapMB,peakRssMB:aiWorkerPeakRssMB,maxRssMB:AI_MAX_RSS_MB,loadTimeoutMs:AI_LOAD_TIMEOUT_MS,progress:aiLoadProgress,attempts:aiAttempts},
   main:{rssMB:Math.round(process.memoryUsage().rss/1024/1024),heapMB:Math.round(process.memoryUsage().heapUsed/1024/1024),uptime:Math.round(process.uptime())},
@@ -187,8 +187,13 @@ const personaStyles=[
  {role:'HUNTER',wpm:[18,25],keyMode:'PADDLE',tone:'active hunter who answers CQs quickly'}
 ];
 const botNames=['LEO','ANA','MATEO','LUIS','CARLOS','DIEGO','SAM','JEAN','MIKE','PAUL','KEN','AKI','ROB','JAN','TOM','ELI','NICO','MAX','IVAN','LUCA'];
-const botQths=['ASUNCION','BUENOS AIRES','MONTEVIDEO','SAO PAULO','SANTIAGO','LIMA','BOGOTA','MIAMI','NEW YORK','MADRID','PARIS','LONDON','TOKYO','SYDNEY','AMSTERDAM'];
-const locators=['GG14','GF05','GF15','GG66','FF46','FH17','FJ24','EL95','FN31','IN80','JN18','IO91','PM95','QF56','JO21'];
+const botLocations=[
+ {qth:'ASUNCION',locator:'GG14'},{qth:'BUENOS AIRES',locator:'GF05'},{qth:'MONTEVIDEO',locator:'GF15'},
+ {qth:'SAO PAULO',locator:'GG66'},{qth:'SANTIAGO',locator:'FF46'},{qth:'LIMA',locator:'FH17'},
+ {qth:'BOGOTA',locator:'FJ24'},{qth:'MIAMI',locator:'EL95'},{qth:'NEW YORK',locator:'FN31'},
+ {qth:'MADRID',locator:'IN80'},{qth:'PARIS',locator:'JN18'},{qth:'LONDON',locator:'IO91'},
+ {qth:'TOKYO',locator:'PM95'},{qth:'SYDNEY',locator:'QF56'},{qth:'AMSTERDAM',locator:'JO21'}
+];
 const callLetters='ABCDEFGHJKLMNPQRSTUVWXYZ';
 const callSeen=new Set();
 function virtualCall(b){
@@ -209,10 +214,11 @@ function randomFreq(b){
 function makeBot(b,index){
  const p=personaStyles[(index+Math.floor(Math.random()*personaStyles.length))%personaStyles.length];
  const wpm=Math.floor(p.wpm[0]+Math.random()*(p.wpm[1]-p.wpm[0]+1));
- return {stationId:id('v'),kind:'virtual',callsign:virtualCall(b),locator:locators[Math.floor(Math.random()*locators.length)],
- band:b,hz:randomFreq(b),homeHz:0,power:10+Math.floor(Math.random()*65),antenna:2,azimuth:0,wpm,keyMode:p.keyMode==='BUG'?'PADDLE':p.keyMode,
+ const loc=botLocations[Math.floor(Math.random()*botLocations.length)];
+ return {stationId:id('v'),kind:'virtual',callsign:virtualCall(b),locator:loc.locator,
+ band:b,hz:randomFreq(b),homeHz:0,power:10+Math.floor(Math.random()*65),antenna:2,azimuth:0,wpm,homeWpm:wpm,keyMode:p.keyMode==='BUG'?'PADDLE':p.keyMode,
  iambicMode:p.keyMode==='BUG'?'BUG':'A',busy:false,keyDown:false,active:true,name:botNames[Math.floor(Math.random()*botNames.length)],
- qth:botQths[Math.floor(Math.random()*botQths.length)],role:p.role,tone:p.tone,state:'LISTEN',lastAction:0,lastCQ:0,waitingUntil:0,partnerId:null,history:[]};
+ qth:loc.qth,role:p.role,tone:p.tone,state:'LISTEN',lastAction:0,lastCQ:0,waitingUntil:0,partnerId:null,history:[]};
 }
 const bots=new Map();
 for(const b of VALID_BANDS)for(let i=0;i<4;i++){const st=makeBot(b,i);st.homeHz=st.hz;bots.set(st.stationId,st)}
@@ -281,14 +287,20 @@ function cleanAIText(raw,bot,other){
  return s||fallbackReply(bot,other);
 }
 async function aiReply(bot,other,context,stage='QSO',source='human'){
- const prompt=`CALL ${bot.callsign}; NAME ${bot.name}; QTH ${bot.qth}; ${bot.power}W; STYLE ${bot.role}.
-HEARD ${String(context||'').slice(-180)}
-STAGE ${stage}. Reply as realistic CW only, uppercase, <=16 words. No explanation. Use BK/K/73 SK correctly.
-ANSWER:`;
+ const oc=other.callsign||'STN';
+ const seed=fallbackReply(bot,other,stage);
+ const prompt=`CW radio reply only. No prose.
+MY CALL ${bot.callsign}. OTHER CALL ${oc}. NAME ${bot.name}. QTH ${bot.qth}. ROLE ${bot.role}.
+HEARD: ${String(context||'').slice(-120)}
+STAGE ${stage}.
+Use this as a safe example and vary it slightly: ${seed}
+Output one uppercase CW line, max 14 words:`;
  try{
-  const raw=await requestAI(prompt,{timeout:7500,source,stage});
-  return raw?cleanAIText(raw,bot,other):fallbackReply(bot,other,stage);
- }catch(err){return fallbackReply(bot,other,stage)}
+  const raw=await requestAI(prompt,{timeout:6500,source,stage});
+  const cleaned=raw?cleanAIText(raw,bot,other):'';
+  if(!cleaned || cleaned.length<6 || !cleaned.includes(bot.callsign)) return seed;
+  return cleaned;
+ }catch(err){return seed}
 }
 
 function findHumanNear(bot,span=500){return [...clients.values()].find(s=>s.band===bot.band&&Math.abs(s.hz-bot.hz)<=span)}
@@ -349,21 +361,36 @@ async function trafficDirector(){
 setInterval(()=>trafficDirector().catch(()=>{}),3500);
 
 function humanLabel(st){return safeText(st.callsign||'STN',16)||'STN'}
+function observedHumanWpm(st){
+ const d=st?.decoder;
+ if(d){
+  const unit=estimatedUnit(d,st);
+  if(Number.isFinite(unit)&&unit>0)return clamp(Math.round(1200/unit),7,35);
+ }
+ return clamp(Math.round(Number(st?.wpm)||15),7,35);
+}
 function chooseBotFor(b,hz){return activeBotsOnBand(b).filter(x=>!x.busy&&x.state!=='QSO').sort((a,c)=>Math.abs(a.hz-hz)-Math.abs(c.hz-hz))[0]||null}
 function sessionKey(userId,botId){return userId+'|'+botId}
-async function scheduleBotReply(user,bot,stage,context,delay=650){
+async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpeed=false}={}){
  if(!bot||bot.busy)return;
- bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;broadcast({type:'station_state',...publicState(bot)});
+ const normalWpm=bot.homeWpm||bot.wpm;
+ const replyWpm=matchHumanSpeed?observedHumanWpm(user):normalWpm;
+ bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;bot.wpm=replyWpm;
+ broadcast({type:'station_state',...publicState(bot)});
  setTimeout(async()=>{
   if(!bot.active||bot.busy)return;
   const text=await aiReply(bot,user,context,stage,'human');
   transmitVirtual(bot,text,{after:()=>{
+   bot.wpm=normalWpm;
    if(stage==='CLOSE'){
     const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,t:Date.now()});
     bot.state='LISTEN';bot.partnerId=null;bot.hz=bot.homeHz;broadcast({type:'station_state',...publicState(bot)});
-   }else{bot.state='WAIT_HUMAN';bot.waitingUntil=Date.now()+30000}
+   }else{
+    bot.state='WAIT_HUMAN';bot.waitingUntil=Date.now()+30000;
+    broadcast({type:'station_state',...publicState(bot)});
+   }
   }});
- },delay+Math.floor(Math.random()*650));
+ },delay+Math.floor(Math.random()*450));
 }
 async function processHumanText(user,text){
  const clean=String(text||'').replace(/\s+/g,' ').trim().toUpperCase();if(!clean||clean.length<1)return;
@@ -375,14 +402,14 @@ async function processHumanText(user,text){
  }
  if(!addressed&&/\bCQ\b/.test(clean)){
   const bot=chooseBotFor(user.band,user.hz);if(!bot)return;
-  qsoSessions.set(sessionKey(user.stationId,bot.stationId),{stage:1,last:Date.now()});
-  return scheduleBotReply(user,bot,'CALL',clean,500);
+  qsoSessions.set(sessionKey(user.stationId,bot.stationId),{stage:1,last:Date.now(),origin:'humanCQ'});
+  return scheduleBotReply(user,bot,'CALL',clean,500,{matchHumanSpeed:true});
  }
  if(!addressed)return;
- const key=sessionKey(user.stationId,addressed.stationId),sess=qsoSessions.get(key)||{stage:1,last:Date.now()};
+ const key=sessionKey(user.stationId,addressed.stationId),sess=qsoSessions.get(key)||{stage:1,last:Date.now(),origin:'botCQ'};
  sess.last=Date.now();qsoSessions.set(key,sess);
- if(/\b73\b|\bSK\b/.test(clean)){qsoSessions.delete(key);return scheduleBotReply(user,addressed,'CLOSE',clean,450)}
- sess.stage++;return scheduleBotReply(user,addressed,'QSO',clean,500);
+ if(/\b73\b|\bSK\b/.test(clean)){qsoSessions.delete(key);return scheduleBotReply(user,addressed,'CLOSE',clean,450,{matchHumanSpeed:sess.origin==='humanCQ'})}
+ sess.stage++;return scheduleBotReply(user,addressed,'QSO',clean,500,{matchHumanSpeed:sess.origin==='humanCQ'});
 }
 
 // Adaptive straight-key decoder: estimates dit length from short marks instead of trusting only selected WPM.
@@ -411,7 +438,7 @@ const server=http.createServer((req,res)=>{
  if(req.url==='/'||req.url==='/health'){
   res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
   res.end(JSON.stringify({
-   ok:true,service:'CW Network',version:'0.28',
+   ok:true,service:'CW Network',version:'0.29',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiBusy,aiQueue:aiQueue.length,aiReadyAt,aiError:aiLastError||null,model:AI_MODEL,aiDtype:AI_DTYPE,aiRequestedDtype:AI_REQUESTED_DTYPE,aiSelectedModel,aiSelectedDtype,aiBootMs,
    aiPid:aiWorker?.pid||null,aiMemoryMB:aiWorkerMemoryMB,aiPeakMemoryMB:aiWorkerPeakRssMB,aiLoadProgress,startedAt:SERVER_STARTED_AT,

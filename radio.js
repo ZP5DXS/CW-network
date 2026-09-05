@@ -409,6 +409,8 @@
       // ~45 degrees per second: noticeable but not painfully slow
       rotorActual=(rotorActual+Math.sign(d)*1.5+360)%360;
       updateRotorUI();
+      refreshRemoteVoices();
+      updateSmeter();
     },33);
   }
   $('#rotor').oninput=()=>{
@@ -1026,15 +1028,28 @@
     return {bearing,distance};
   }
   function antennaFactor(st){
+    // ANT 2: omnidirectional 1/4-wave vertical.
     if(antenna!==1) return 1;
     const geo=bearingDistanceTo(st.locator);
     if(!geo) return 1;
+
+    // ANT 1: deliberately audible 3-element Yagi pattern.
+    // Front ≈ +5 dB, sides heavily attenuated, rear ≈ -16 dB.
+    // Continuous interpolation prevents abrupt jumps while the rotor turns.
     const d=Math.abs(shortestDelta(rotorActual,geo.bearing));
-    if(d<=30) return 1.65;
-    if(d<=60) return 1.15;
-    if(d<=100) return .72;
-    if(d<=140) return .50;
-    return .38;
+    const points=[
+      [0,1.78],[20,1.68],[35,1.42],[50,1.05],
+      [70,.72],[90,.48],[110,.34],[130,.25],
+      [150,.19],[180,.16]
+    ];
+    for(let i=1;i<points.length;i++){
+      if(d<=points[i][0]){
+        const [a0,g0]=points[i-1], [a1,g1]=points[i];
+        const x=(d-a0)/(a1-a0);
+        return g0+(g1-g0)*x;
+      }
+    }
+    return .16;
   }
   function propagationFactor(st){
     const kp=Number.isFinite(spaceWeather.kp)?spaceWeather.kp:2;
