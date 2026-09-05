@@ -889,24 +889,11 @@
     if(directHeld.size===0) keyUp();
   }
 
-  window.addEventListener('keydown',e=>{
-    if(e.code==='Space' && !isEditing()){
-      e.preventDefault();
-      e.stopPropagation();
-    }
-  },{capture:true,passive:false});
-  window.addEventListener('keyup',e=>{
-    if(e.code==='Space' && !isEditing()){
-      e.preventDefault();
-      e.stopPropagation();
-    }
-  },{capture:true,passive:false});
-
   document.addEventListener('keydown',e=>{
     if(e.repeat) return;
 
     if(e.code==='Space'){
-      if(!isEditing()){ e.preventDefault(); e.stopPropagation(); directPress(e.code); }
+      if(!isEditing()){ e.preventDefault(); directPress(e.code); }
       return;
     }
 
@@ -943,7 +930,7 @@
 
   document.addEventListener('keyup',e=>{
     if(e.code==='Space'){
-      if(!isEditing()){ e.preventDefault(); e.stopPropagation(); directRelease(e.code); }
+      if(!isEditing()){ e.preventDefault(); directRelease(e.code); }
       return;
     }
 
@@ -1306,27 +1293,36 @@
     updateSmeter();
   }
 
+  function setNetworkState(state){
+    const el=$('#netState'); if(!el) return;
+    const s=String(state||'').toUpperCase();
+    el.textContent=s;
+    el.classList.remove('online','reconnecting','offline');
+    if(s==='ONLINE') el.classList.add('online');
+    else if(s==='RECONNECTING'||s==='CONNECTING') el.classList.add('reconnecting');
+    else el.classList.add('offline');
+  }
+
   function connectNetwork(){
     clearTimeout(reconnectTimer);
     const generation=++socketGeneration;
     if(ws && (ws.readyState===WebSocket.OPEN || ws.readyState===WebSocket.CONNECTING)){
       try{ ws.onclose=null; ws.close(); }catch(_){}
     }
-    $('#netState').textContent=connectedOnce?'RECONNECTING':'CONNECTING';
+    setNetworkState(connectedOnce?'RECONNECTING':'CONNECTING');
     let sock;
     try{ sock=new WebSocket(WS_URL); ws=sock; }catch(e){ return scheduleReconnect(); }
     sock.onopen=()=>{
       if(generation!==socketGeneration) return;
       reconnectAttempts=0;
-      connectedOnce=true; $('#netState').textContent='ONLINE'; log('Network connected.');
+      connectedOnce=true; setNetworkState('ONLINE');
       lastStateSent=''; scheduleStateSend(true);
     };
     sock.onclose=()=>{
       if(generation!==socketGeneration) return;
       silenceAllRemoteVoices('socket close');
       for(const id of [...cwFramePlaybacks.keys()])stopFramePlayback(id);
-      $('#netState').textContent='RECONNECTING';
-      log('Network connection lost. Reconnecting…');
+      setNetworkState('RECONNECTING');
       scheduleReconnect();
     };
     sock.onerror=()=>{};
@@ -1721,10 +1717,23 @@
   // -------- Real network statistics --------
   let globalStats={};
   function fmtHours(sec){const h=(Number(sec)||0)/3600;return h<100?h.toFixed(1)+' h':Math.round(h)+' h';}
+  function countryFlag(code){
+    const c=String(code||'').trim().toUpperCase();
+    if(!/^[A-Z]{2}$/.test(c)) return '';
+    return String.fromCodePoint(...[...c].map(ch=>127397+ch.charCodeAt(0)));
+  }
+  function renderCountryFlags(codes){
+    const track=$('#flagTrack'); if(!track) return;
+    const flags=[...new Set((Array.isArray(codes)?codes:[]).map(countryFlag).filter(Boolean))];
+    if(!flags.length){ track.innerHTML=''; return; }
+    const doubled=flags.length===1?[...flags,...flags,...flags,...flags]:[...flags,...flags];
+    track.innerHTML=doubled.map(f=>`<span>${f}</span>`).join('');
+  }
   function renderGlobalStats(s={}){
     globalStats={...globalStats,...s};
     if(s.visits!=null)$('#visitStat').textContent=Number(s.visits).toLocaleString();
     if(s.countries!=null)$('#countryStat').textContent=Number(s.countries).toLocaleString();
+    if(Array.isArray(s.country_codes))renderCountryFlags(s.country_codes);
     if(s.usage_seconds!=null)$('#usageStat').textContent=fmtHours(s.usage_seconds);
     if(s.qsos!=null)$('#qsoStat').textContent=Number(s.qsos).toLocaleString();
     if(s.avg_wpm!=null)$('#avgWpmStat').textContent=Number(s.avg_wpm).toFixed(1);

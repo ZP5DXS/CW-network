@@ -25,6 +25,11 @@ body{min-height:100vh}
 .statusbar{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:12px}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:9px 11px}
 .stat b{display:block;font-size:13px}.stat span{color:var(--muted);font-size:12px}
+.netStateValue{display:flex!important;align-items:center;gap:7px}
+.netStateValue:before{content:"";width:7px;height:7px;border-radius:50%;background:#e2c36b;box-shadow:0 0 7px rgba(226,195,107,.55);flex:0 0 auto}
+.netStateValue.online:before{background:#53d18c;box-shadow:0 0 8px rgba(83,209,140,.65)}
+.netStateValue.reconnecting:before{background:#e2c36b;box-shadow:0 0 8px rgba(226,195,107,.55)}
+.netStateValue.offline:before{background:#f06b6b;box-shadow:0 0 8px rgba(240,107,107,.55)}
 .radio{display:grid;grid-template-columns:minmax(0,2.1fr) minmax(300px,.9fr);gap:12px}
 .main,.side{display:flex;flex-direction:column;gap:12px}
 .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:16px;padding:12px;box-shadow:0 10px 25px rgba(0,0,0,.18)}
@@ -190,7 +195,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
   </div>
 
   <div class="statusbar">
-    <div class="stat"><b id="netState">CONNECTING</b><span>Network</span></div>
+    <div class="stat"><b id="netState" class="netStateValue reconnecting">CONNECTING</b><span>Network link</span></div>
     <div class="stat"><b id="onlineUsers">0</b><span>Operators online</span></div>
     <div class="stat"><b id="bandActivity">40M · LOW</b><span>Band activity</span></div>
     <div class="stat"><b id="utc">--:--:--</b><span>UTC</span></div>
@@ -324,7 +329,6 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
         </div>
 <div class="log activityLog" id="log">
           <div><time>--:--:--</time>Local radio ready.</div>
-          <div><time>--:--:--</time>Connecting to Render WebSocket…</div>
                   </div>
 
         <div class="activityDetails" id="activityDetails">
@@ -344,13 +348,10 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 
   <footer class="footer footerStats">
     <div class="footerBrand">
-      <div class="footerTitle">CW NETWORK RADIO <span>· v0.41</span></div>
+      <div class="footerTitle">CW NETWORK RADIO <span>· v0.42</span></div>
       <div class="footerTag">Free · No ads · Browser-based · Worldwide CW · AI assisted by Gemini</div>
       <div class="flagMarquee" aria-label="Worldwide CW">
-        <div class="flagTrack">
-          <span>🇵🇾</span><span>🇦🇷</span><span>🇧🇷</span><span>🇺🇾</span><span>🇨🇱</span><span>🇵🇪</span><span>🇨🇴</span><span>🇺🇸</span><span>🇨🇦</span><span>🇲🇽</span><span>🇪🇸</span><span>🇵🇹</span><span>🇫🇷</span><span>🇩🇪</span><span>🇮🇹</span><span>🇬🇧</span><span>🇯🇵</span><span>🇦🇺</span><span>🇳🇿</span><span>🇿🇦</span>
-          <span>🇵🇾</span><span>🇦🇷</span><span>🇧🇷</span><span>🇺🇾</span><span>🇨🇱</span><span>🇵🇪</span><span>🇨🇴</span><span>🇺🇸</span><span>🇨🇦</span><span>🇲🇽</span><span>🇪🇸</span><span>🇵🇹</span><span>🇫🇷</span><span>🇩🇪</span><span>🇮🇹</span><span>🇬🇧</span><span>🇯🇵</span><span>🇦🇺</span><span>🇳🇿</span><span>🇿🇦</span>
-        </div>
+        <div class="flagTrack" id="flagTrack"></div>
       </div>
     </div>
     <div class="footerStat"><small>Visits</small><b id="visitStat">—</b></div>
@@ -363,6 +364,6 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
   </footer>
 </div>
 
-<script src="radio.js?v=041" defer></script>
+<script src="radio.js?v=0421" defer></script>
 </body>
 </html>

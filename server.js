@@ -77,7 +77,7 @@ async function refreshStatsCache(){
 function clientIp(req){const x=String(req.headers['x-forwarded-for']||'').split(',')[0].trim();return x||String(req.socket?.remoteAddress||'').replace(/^::ffff:/,'')}
 async function countryForIp(ip){
  if(!ip||ip==='127.0.0.1'||ip==='::1')return {code:'',name:''};if(countryCache.has(ip))return countryCache.get(ip);
- let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.41'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
+ let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.42'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
  countryCache.set(ip,out);setTimeout(()=>countryCache.delete(ip),6*60*60*1000);return out;
 }
 function maidenheadToLatLonServer(locator){
@@ -267,7 +267,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.41',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.42',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -365,7 +365,7 @@ for(const b of VALID_BANDS){
  });
 }
 
-const services=new Map([...VALID_BANDS].map(b=>[b,{stationId:`svc_${b}`,kind:'service',callsign:'CWN',locator:'',band:b,hz:SERVICE_FREQ[b],power:40,antenna:2,azimuth:0,wpm:18,keyMode:'PADDLE',iambicMode:'A',busy:false,keyDown:false,active:true}]));
+const services=new Map([...VALID_BANDS].map(b=>[b,{stationId:`svc_${b}`,kind:'service',callsign:'CWN',locator:'',band:b,hz:SERVICE_FREQ[b],power:40,antenna:2,azimuth:0,wpm:13,keyMode:'PADDLE',iambicMode:'A',busy:false,keyDown:false,active:true}]));
 const qsoSessions=new Map();
 const pileups=new Map();
 
@@ -436,7 +436,7 @@ function transmitVirtual(st,text,{service=false,after=null}={}){
  if((!st.active&&!service)||st.busy)return false;
  text=safeText(text,180).replace(/\s+/g,' ').trim();if(!text)return false;
  st.busy=true;st.lastText=text;st.history=(st.history||[]).concat(text).slice(-6);
- const {events,duration}=morseTimeline(text,st.wpm),kind=service?'service':'human';
+ const {events,duration}=morseTimeline(text,st.wpm),kind=service?'service':(st.kind||'virtual');
 
  // v0.32: virtual CW is delivered as one deterministic timeline.
  // The browser buffers it briefly and schedules every edge on the WebAudio clock.
@@ -868,7 +868,7 @@ const server=http.createServer(async(req,res)=>{
  if(urlObj.pathname==='/stats'){sendJson(res,200,{ok:true,...statsCache});return;}
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.41',
+   ok:true,service:'CW Network',version:'0.42',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -927,7 +927,18 @@ wss.on('connection',(ws,req)=>{
 
 function serviceCycle(){
  const hhmm=new Date().toISOString().slice(11,16).replace(':','');
- for(const [b,st] of services){if(st.busy)continue;transmitVirtual(st,`CWN DE CWN UTC ${hhmm} USERS ${clients.size} BAND ${b}M ACT ${activityLevel(b)} KP ${spaceWeather.kp??'NA'} SFI ${spaceWeather.sfi??'NA'} 73`,{service:true})}
+ const useHours=(Number(statsCache.usage_seconds)||0)/3600;
+ const useText=useHours<100?useHours.toFixed(1):String(Math.round(useHours));
+ const dx=Math.round(Number(statsCache.max_distance_km)||0);
+ const avg=Number(statsCache.avg_wpm)||0;
+ const visits=Number(statsCache.visits)||0;
+ const countries=Number(statsCache.countries)||0;
+ const qsos=Number(statsCache.qsos)||0;
+ for(const [b,st] of services){
+  if(st.busy)continue;
+  const msg=`CWN INFO UTC ${hhmm} VISITS ${visits} COUNTRIES ${countries} USE ${useText}H QSOS ${qsos} AVG ${avg.toFixed(1)} WPM DX ${dx}KM BAND ${b}M KP ${spaceWeather.kp??'NA'} SFI ${spaceWeather.sfi??'NA'} 73`;
+  transmitVirtual(st,msg,{service:true});
+ }
 }
 setTimeout(serviceCycle,5000);setInterval(serviceCycle,60000);
 
@@ -959,4 +970,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.41 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.42 listening on ${PORT}`));
