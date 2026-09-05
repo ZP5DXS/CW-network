@@ -203,7 +203,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.35',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.37',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -227,11 +227,11 @@ async function probeGemini(){
 setTimeout(probeGemini,1800);
 
 const personaStyles=[
- {role:'SKCC',wpm:[15,15],keyMode:'STRAIGHT',tone:'friendly traditional SKCC-style operator'},
- {role:'POTA',wpm:[15,15],keyMode:'PADDLE',tone:'concise portable activator calling CQ POTA'},
- {role:'SOTA',wpm:[15,15],keyMode:'PADDLE',tone:'concise summit activator calling CQ SOTA'},
- {role:'CQ',wpm:[15,15],keyMode:'PADDLE',tone:'general CW operator calling CQ'},
- {role:'DX',wpm:[15,15],keyMode:'PADDLE',tone:'concise DX operator calling CQ DX'}
+ {role:'SKCC',wpm:[13,13],keyMode:'STRAIGHT',tone:'friendly traditional SKCC-style operator'},
+ {role:'POTA',wpm:[13,13],keyMode:'PADDLE',tone:'concise portable activator calling CQ POTA'},
+ {role:'SOTA',wpm:[13,13],keyMode:'PADDLE',tone:'concise summit activator calling CQ SOTA'},
+ {role:'CQ',wpm:[13,13],keyMode:'PADDLE',tone:'general CW operator calling CQ'},
+ {role:'DX',wpm:[13,13],keyMode:'PADDLE',tone:'concise DX operator calling CQ DX'}
 ];
 const botNames=['LEO','ANA','MATEO','LUIS','CARLOS','DIEGO','SAM','JEAN','MIKE','PAUL','KEN','AKI','ROB','JAN','TOM','ELI','NICO','MAX','IVAN','LUCA'];
 const botLocations=[
@@ -243,13 +243,19 @@ const botLocations=[
 ];
 const callLetters='ABCDEFGHJKLMNPQRSTUVWXYZ';
 const callSeen=new Set();
-function virtualCall(b){
+const pickLetter=()=>callLetters[Math.floor(Math.random()*callLetters.length)];
+const pickDigit=()=>String(Math.floor(Math.random()*9)+1);
+function virtualCall(){
  let call;
  do{
-  const a=callLetters[Math.floor(Math.random()*callLetters.length)];
-  const c=callLetters[Math.floor(Math.random()*callLetters.length)];
-  const d=Math.floor(Math.random()*9)+1;
-  call=`CWN${String(b).slice(0,1)}${a}${d}${c}`;
+  // Keep virtual calls short and easy to copy in CW:
+  // 65%: two letters + one digit + two/three letters (e.g. LU7DX, PY2ABC)
+  // 35%: letter + digit + two/three letters (e.g. K1CW, G3ABC)
+  if(Math.random()<.65){
+   call=pickLetter()+pickLetter()+pickDigit()+pickLetter()+pickLetter()+(Math.random()<.30?pickLetter():'');
+  }else{
+   call=pickLetter()+pickDigit()+pickLetter()+pickLetter()+(Math.random()<.30?pickLetter():'');
+  }
  }while(callSeen.has(call));
  callSeen.add(call);return call;
 }
@@ -275,10 +281,10 @@ function randomFreeFreq(b,exclude=''){
 
 function makeBot(b,index){
  const p=personaStyles[index%personaStyles.length];
- const wpm=15;
+ const wpm=13;
  const loc=botLocations[Math.floor(Math.random()*botLocations.length)];
- return {stationId:id('v'),kind:'virtual',callsign:virtualCall(b),locator:loc.locator,
- band:b,hz:randomFreq(b),homeHz:0,power:10+Math.floor(Math.random()*65),antenna:2,azimuth:0,wpm,homeWpm:15,keyMode:p.keyMode,
+ return {stationId:id('v'),kind:'virtual',callsign:virtualCall(),locator:loc.locator,
+ band:b,hz:randomFreq(b),homeHz:0,power:10+Math.floor(Math.random()*65),antenna:2,azimuth:0,wpm,homeWpm:13,keyMode:p.keyMode,
  iambicMode:'A',busy:false,keyDown:false,active:true,name:botNames[Math.floor(Math.random()*botNames.length)],
  qth:loc.qth,role:p.role,tone:p.tone,state:'LISTEN',lastAction:0,lastCQ:0,waitingUntil:0,partnerId:null,history:[],bornAt:Date.now(),nextMoveAt:0,nextCQAt:Date.now()+2500+Math.random()*8000};
 }
@@ -320,7 +326,7 @@ function rebalanceBots(){
    const candidates=pool.filter(x=>!x.active);
    if(!candidates.length)break;
    const st=candidates[Math.floor(Math.random()*candidates.length)];
-   st.hz=randomFreeFreq(b,st.stationId);st.homeHz=st.hz;st.wpm=st.homeWpm=15;
+   st.hz=randomFreeFreq(b,st.stationId);st.homeHz=st.hz;st.wpm=st.homeWpm=13;
    st.bornAt=now;
    st.nextMoveAt=now+65000+Math.random()*90000;
    st.nextCQAt=now+1500+Math.random()*7000;
@@ -343,7 +349,7 @@ function rebalanceBots(){
    if(replacement.length){
     setBotActive(old,false);
     const st=replacement[Math.floor(Math.random()*replacement.length)];
-    st.hz=randomFreeFreq(b,st.stationId);st.homeHz=st.hz;st.wpm=st.homeWpm=15;
+    st.hz=randomFreeFreq(b,st.stationId);st.homeHz=st.hz;st.wpm=st.homeWpm=13;
     st.bornAt=now;st.nextMoveAt=now+65000+Math.random()*90000;
     st.nextCQAt=now+1200+Math.random()*5500;
     setBotActive(st,true);
@@ -497,7 +503,7 @@ async function botCallCQ(st){
   st.hz=randomFreeFreq(st.band,st.stationId);st.homeHz=st.hz;
   broadcast({type:'station_state',...publicState(st)});
  }
- st.wpm=st.homeWpm=15;
+ st.wpm=st.homeWpm=13;
  st.state='CQ';st.lastCQ=Date.now();
  const text={
   SKCC:`CQ SKCC CQ SKCC DE ${st.callsign} ${st.callsign} K`,
@@ -510,7 +516,7 @@ async function botCallCQ(st){
   st.state='WAIT_REPLY';st.waitingUntil=Date.now()+16000;
   setTimeout(()=>{
    if(st.state==='WAIT_REPLY'&&Date.now()>=st.waitingUntil){
-    st.state='LISTEN';st.wpm=st.homeWpm=15;
+    st.state='LISTEN';st.wpm=st.homeWpm=13;
     st.nextCQAt=Date.now()+4500+Math.random()*8500;
    }
   },16500);
@@ -576,7 +582,7 @@ async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpee
    bot.wpm=normalWpm;
    if(stage==='CLOSE'){
     const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,t:Date.now()});
-    bot.state='LISTEN';bot.partnerId=null;bot.wpm=bot.homeWpm=15;
+    bot.state='LISTEN';bot.partnerId=null;bot.wpm=bot.homeWpm=13;
     bot.hz=randomFreeFreq(bot.band,bot.stationId);bot.homeHz=bot.hz;
     bot.nextMoveAt=Date.now()+65000+Math.random()*90000;
     bot.nextCQAt=Date.now()+5000+Math.random()*9000;
@@ -613,11 +619,11 @@ async function processHumanText(user,text){
  sessionPush(sess,humanLabel(user),clean);
  if(/\bQRS\b/.test(clean)){
   const observed=observedHumanWpm(user);
-  sess.requestedWpm=clamp(Math.min(observed,12),7,12);
+  sess.requestedWpm=clamp(Math.min(observed,11),7,11);
  }
  if(/\bQRQ\b/.test(clean)){
-  const current=sess.requestedWpm||15;
-  sess.requestedWpm=clamp(current+3,15,30);
+  const current=sess.requestedWpm||13;
+  sess.requestedWpm=clamp(current+2,13,30);
  }
  if(/\b73\b|\bSK\b/.test(clean)){
   return scheduleBotReply(user,addressed,'CLOSE',clean,450,{matchHumanSpeed:false,session:sess,sessionKeyValue:key});
@@ -703,7 +709,7 @@ const server=http.createServer(async(req,res)=>{
  const urlObj=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.35',
+   ok:true,service:'CW Network',version:'0.37',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -791,4 +797,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.35 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.37 listening on ${PORT}`));

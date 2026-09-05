@@ -277,7 +277,7 @@
     btn.classList.add('active');
     band=nextBand; hz=bands[band].center; redraw();
     $('#bandActivity').textContent=band+'M · …';
-    updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); resetDecoder();
+    updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); scheduleRadioBursts(); resetDecoder();
     bandsUsed.add(band);
     $('#bandsUsedStat').textContent=bandsUsed.size;
     updateServiceUI();
@@ -479,6 +479,7 @@
     scheduleQrn();
     scheduleQrm();
     scheduleStatic();
+    scheduleRadioBursts();
   }
 
   function filterCaptureHz(){
@@ -504,29 +505,34 @@
   function scheduleQrn(){
     clearTimeout(qrnTimer);
     if(!audioCtx)return;
-    const bandRate={40:1.0,20:.66,15:.40,10:.24}[band]||.45;
+    const bandRate={40:.90,20:.62,15:.39,10:.23}[band]||.42;
     const kp=Number.isFinite(spaceWeather.kp)?spaceWeather.kp:2;
-    const delay=(2600+Math.random()*7600)/Math.max(.38,bandRate*(1+kp*.035));
+    const delay=(3200+Math.random()*9000)/Math.max(.35,bandRate*(1+kp*.035));
 
     qrnTimer=setTimeout(()=>{
       if(audioCtx&&qrnBuffer&&rxMaster){
         const nb=$('#nb').classList.contains('active');
         const nr=$('#nr').classList.contains('active');
-        const strikes=Math.random()<.22?2:1;
+        const strikes=Math.random()<.28?2:1;
+
         for(let s=0;s<strikes;s++){
           const src=audioCtx.createBufferSource();src.buffer=qrnBuffer;
 
-          const hp=audioCtx.createBiquadFilter();hp.type='highpass';hp.frequency.value=120+Math.random()*180;hp.Q.value=.35;
-          const lp=audioCtx.createBiquadFilter();lp.type='lowpass';lp.frequency.value=1700+Math.random()*2200;lp.Q.value=.42;
+          const hp=audioCtx.createBiquadFilter();hp.type='highpass';
+          hp.frequency.value=120+Math.random()*250;hp.Q.value=.35;
+
+          const lp=audioCtx.createBiquadFilter();lp.type='lowpass';
+          lp.frequency.value=2100+Math.random()*2600;lp.Q.value=.42;
+
           const g=audioCtx.createGain();
+          const base={40:.34,20:.23,15:.145,10:.090}[band]||.14;
+          const amp=base*(.75+Math.random()*.9)*(nb?.20:1)*(nr?.80:1);
+          const when=audioCtx.currentTime+s*(.055+Math.random()*.15);
 
-          const base={40:.28,20:.19,15:.12,10:.075}[band]||.12;
-          const amp=base*(.70+Math.random()*.85)*(nb?.22:1)*(nr?.78:1);
-          const when=audioCtx.currentTime+s*(.065+Math.random()*.16);
-
-          g.gain.setValueAtTime(0,when);
-          g.gain.linearRampToValueAtTime(amp,when+.002);
-          g.gain.exponentialRampToValueAtTime(Math.max(.0008,amp*.08),when+.20+Math.random()*.12);
+          g.gain.setValueAtTime(.0001,when);
+          g.gain.exponentialRampToValueAtTime(Math.max(.001,amp),when+.003);
+          g.gain.exponentialRampToValueAtTime(Math.max(.0008,amp*.18),when+.11+Math.random()*.09);
+          g.gain.exponentialRampToValueAtTime(.0008,when+.28+Math.random()*.22);
 
           src.connect(hp);hp.connect(lp);lp.connect(g);g.connect(rxMaster);
           src.start(when);
@@ -536,7 +542,7 @@
     },delay);
   }
 
-  let qrmTimer=null,staticTimer=null;
+  let qrmTimer=null,staticTimer=null,burstTimer=null;
   function scheduleQrm(){
     clearTimeout(qrmTimer);
     if(!audioCtx)return;
@@ -587,49 +593,108 @@
     clearTimeout(staticTimer);
     if(!audioCtx)return;
 
-    // Sparse static crashes, not constant crackling. 40 m remains livelier.
-    const density={40:1.0,20:.70,15:.45,10:.28}[band]||.45;
-    const delay=(1200+Math.random()*4200)/density;
+    // Sparse sharp electrical clicks remain, but they are now a minor layer.
+    const density={40:.75,20:.55,15:.38,10:.24}[band]||.4;
+    const delay=(1700+Math.random()*5200)/density;
 
     staticTimer=setTimeout(()=>{
       if(audioCtx&&rxMaster){
         const nb=$('#nb').classList.contains('active');
         const nr=$('#nr').classList.contains('active');
 
-        const dur=.055+Math.random()*.16;
-        const len=Math.max(256,Math.floor(audioCtx.sampleRate*dur));
+        const dur=.012+Math.random()*.045;
+        const len=Math.max(128,Math.floor(audioCtx.sampleRate*dur));
         const buf=audioCtx.createBuffer(1,len,audioCtx.sampleRate);
         const d=buf.getChannelData(0);
 
-        let low=0;
         for(let i=0;i<len;i++){
           const t=i/audioCtx.sampleRate;
           const white=Math.random()*2-1;
-          low=low*.88+white*.12;
-          const edge=Math.exp(-t/.006);
-          const tail=Math.exp(-t/(.045+Math.random()*.035));
-          d[i]=white*edge*.95 + low*tail*.72;
+          const env=Math.exp(-t/(.006+Math.random()*.010));
+          d[i]=white*env;
         }
 
         const src=audioCtx.createBufferSource();src.buffer=buf;
-        const bp=audioCtx.createBiquadFilter();bp.type='bandpass';
-        bp.frequency.value=900+Math.random()*1100;bp.Q.value=.45;
+        const hp=audioCtx.createBiquadFilter();hp.type='highpass';
+        hp.frequency.value=900+Math.random()*1800;hp.Q.value=.55;
         const g=audioCtx.createGain();
-        const base={40:.105,20:.072,15:.045,10:.027}[band]||.045;
-        g.gain.value=base*(.65+Math.random()*.8)*(nb?.20:1)*(nr?.78:1);
+        const base={40:.085,20:.060,15:.040,10:.025}[band]||.04;
+        g.gain.value=base*(.6+Math.random()*.85)*(nb?.16:1)*(nr?.78:1);
 
-        src.connect(bp);bp.connect(g);g.connect(rxMaster);
+        src.connect(hp);hp.connect(g);g.connect(rxMaster);
         src.start();
-
-        // Small chance of a second distant impulse, like a multi-stroke static crash.
-        if(Math.random()<.18){
-          const src2=audioCtx.createBufferSource();src2.buffer=buf;
-          const g2=audioCtx.createGain();g2.gain.value=g.gain.value*.55;
-          src2.connect(bp);bp.connect(g2);g2.connect(rxMaster);
-          src2.start(audioCtx.currentTime+.08+Math.random()*.13);
-        }
       }
       scheduleStatic();
+    },delay);
+  }
+
+  function scheduleRadioBursts(){
+    clearTimeout(burstTimer);
+    if(!audioCtx)return;
+
+    // Radio-like impulsive static: broader "shhh-KRSHH" bursts with a fast rise,
+    // noisy body and uneven decay. This is the dominant transient layer.
+    const density={40:1.0,20:.72,15:.48,10:.30}[band]||.5;
+    const delay=(950+Math.random()*3600)/density;
+
+    burstTimer=setTimeout(()=>{
+      if(audioCtx&&rxMaster){
+        const nb=$('#nb').classList.contains('active');
+        const nr=$('#nr').classList.contains('active');
+
+        const duration=.10+Math.random()*.42;
+        const len=Math.max(512,Math.floor(audioCtx.sampleRate*duration));
+        const buf=audioCtx.createBuffer(1,len,audioCtx.sampleRate);
+        const d=buf.getChannelData(0);
+
+        let low=0, mid=0;
+        const rise=.004+Math.random()*.010;
+        const fall=.055+Math.random()*.20;
+        const gateFreq=7+Math.random()*18;
+        const phase=Math.random()*Math.PI*2;
+
+        for(let i=0;i<len;i++){
+          const t=i/audioCtx.sampleRate;
+          const white=Math.random()*2-1;
+          low=low*.94+white*.06;
+          mid=mid*.74+white*.26;
+
+          const attack=1-Math.exp(-t/rise);
+          const decay=Math.exp(-t/fall);
+          const flutter=.72+.28*Math.max(0,Math.sin(2*Math.PI*gateFreq*t+phase));
+          const env=attack*decay*flutter;
+
+          d[i]=(white*.58 + mid*.58 + low*.34)*env;
+        }
+
+        const src=audioCtx.createBufferSource();src.buffer=buf;
+
+        const hp=audioCtx.createBiquadFilter();hp.type='highpass';
+        hp.frequency.value=180+Math.random()*420;hp.Q.value=.45;
+
+        const lp=audioCtx.createBiquadFilter();lp.type='lowpass';
+        lp.frequency.value=2200+Math.random()*2600;lp.Q.value=.38;
+
+        const g=audioCtx.createGain();
+        const base={40:.20,20:.14,15:.090,10:.055}[band]||.09;
+        const amp=base*(.70+Math.random()*.95)*(nb?.25:1)*(nr?.76:1);
+        g.gain.value=amp;
+
+        src.connect(hp);hp.connect(lp);lp.connect(g);g.connect(rxMaster);
+        src.start();
+
+        // Sometimes a second impulse follows shortly after, like RF hash or a
+        // nearby switching source rather than a "fire crackle".
+        if(Math.random()<.32){
+          const src2=audioCtx.createBufferSource();src2.buffer=buf;
+          const bp2=audioCtx.createBiquadFilter();bp2.type='bandpass';
+          bp2.frequency.value=700+Math.random()*1700;bp2.Q.value=.55;
+          const g2=audioCtx.createGain();g2.gain.value=amp*(.35+Math.random()*.35);
+          src2.connect(bp2);bp2.connect(g2);g2.connect(rxMaster);
+          src2.start(audioCtx.currentTime+.07+Math.random()*.20);
+        }
+      }
+      scheduleRadioBursts();
     },delay);
   }
 
@@ -1138,7 +1203,7 @@
       $('#prop').textContent=(spaceWeather.kp==null&&spaceWeather.sfi==null)
         ?'NOAA · UNAVAILABLE'
         :`Kp ${spaceWeather.kp?.toFixed(1)??'–'} · SFI ${spaceWeather.sfi??'–'}`;
-      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic();
+      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); scheduleRadioBursts();
       return;
     }
     if(m.type==='qso_complete'){
