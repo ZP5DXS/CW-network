@@ -290,7 +290,6 @@
     $('#bandActivity').textContent=band+'M · …';
     updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); scheduleRadioBursts(); resetDecoder();
     bandsUsed.add(band);
-    $('#bandsUsedStat').textContent=bandsUsed.size;
     updateServiceUI();
     renderNpcList();
     log('Band changed to '+band+'m.');
@@ -319,9 +318,7 @@
     iambicMode = iambicMode==='A' ? 'B' : (iambicMode==='B' ? 'BUG' : 'A');
     $('#iambicMode').textContent=iambicMode;
     $('#iambicMode').classList.toggle('active',iambicMode!=='A');
-    $('#keybar').textContent=iambicMode==='BUG'
-      ? 'PADDLE · BUG'
-      : 'PADDLE · IAMBIC '+iambicMode;
+    $('#keybar').innerHTML='<div><b>KEY AREA</b><small>SPACE · CLICK · TOUCH · ADAPTER</small></div>';
     log('Paddle mode '+iambicMode+'.');
   };
   $('#wf').onclick=()=>{
@@ -374,11 +371,7 @@
     $('#iambicMode').disabled=!paddleOn;
     $('#iambicMode').classList.toggle('disabledCtl',!paddleOn);
     $('#reverse').disabled=!paddleOn;
-    $('#keybar').textContent=keyMode==='STRAIGHT'
-      ? 'SPACE / CTRL / [ ] / MOUSE / TOUCH · KEY'
-      : (iambicMode==='BUG'
-          ? 'PADDLE · BUG · LEFT DIT / RIGHT DAH'
-          : 'PADDLE · IAMBIC '+iambicMode+' · LEFT DIT / RIGHT DAH');
+    $('#keybar').innerHTML='<div><b>KEY AREA</b><small>SPACE · CLICK · TOUCH · ADAPTER</small></div>';
 
     log('Key input: '+keyMode+'.');
     scheduleStateSend();
@@ -424,7 +417,9 @@
       updateSmeter();
     },33);
   }
+  $('#rotor').addEventListener('pointerdown',e=>{if(!requireLocatorForRotor()){e.preventDefault();}});
   $('#rotor').oninput=()=>{
+    if(!requireLocatorForRotor())return;
     rotorTarget=+$('#rotor').value;
     $('#rotorText').textContent=String(rotorTarget).padStart(3,'0')+'°';
     driveRotor();
@@ -1220,90 +1215,58 @@
   };
 
   const STATION_STORAGE_KEY='cwNetworkStationV1';
-  let stationSavedSnapshot='';
-
+  const VISITOR_STORAGE_KEY='cwNetworkVisitorV1';
+  let stationSavedSnapshot='',stationEditMode=false;
+  let visitorId=localStorage.getItem(VISITOR_STORAGE_KEY)||'';
+  if(!visitorId){
+    try{visitorId=(crypto.randomUUID?crypto.randomUUID():'v_'+Date.now()+'_'+Math.random().toString(36).slice(2));}
+    catch(_){visitorId='v_'+Date.now()+'_'+Math.random().toString(36).slice(2);}
+    localStorage.setItem(VISITOR_STORAGE_KEY,visitorId);
+  }
   function normalizedStationIdentity(){
-    return {
-      callsign:($('#callsign').value||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,16),
-      locator:($('#locator').value||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,10)
-    };
+    return {callsign:($('#callsign').value||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,16),
+            locator:($('#locator').value||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,10)};
   }
-  function validCallsign(v){
-    return /^(?=.{3,12}$)(?=.*[A-Z])(?=.*\d)[A-Z0-9]+(?:\/[A-Z0-9]+)?$/.test(v);
-  }
-  function validLocator(v){
-    return !v || /^[A-R]{2}\d{2}(?:[A-X]{2})?$/.test(v);
-  }
-  function setStationFeedback(text,state=''){
-    const el=$('#stationSaveStatus');
-    el.textContent=text;
-    el.classList.remove('ok','warn','err');
-    if(state)el.classList.add(state);
-  }
-  function updateStationDirtyUi(){
-    const id=normalizedStationIdentity();
-    const sig=JSON.stringify(id);
-    const dirty=sig!==stationSavedSnapshot;
-    $('#saveStation').classList.toggle('dirty',dirty);
-    $('#saveStation').textContent=stationSavedSnapshot?(dirty?'SAVE CHANGES':'SAVED'):'SAVE STATION';
-    if(dirty && stationSavedSnapshot)setStationFeedback('Unsaved changes','warn');
+  function validCallsign(v){return /^(?=.{3,12}$)(?=.*[A-Z])(?=.*\d)[A-Z0-9]+(?:\/[A-Z0-9]+)?$/.test(v);}
+  function validLocator(v){return !v||/^[A-R]{2}\d{2}(?:[A-X]{2})?$/.test(v);}
+  function setStationEditMode(on,focusLocator=false){
+    stationEditMode=on;$('#callsign').disabled=!on;$('#locator').disabled=!on;
+    $('#saveStation').textContent=on?'SAVE':'EDIT';$('#saveStation').classList.toggle('dirty',on);
+    if(on){const el=focusLocator?$('#locator'):$('#callsign');setTimeout(()=>{el.focus();el.select?.();},0);}
   }
   function loadStationIdentity(){
     try{
       const saved=JSON.parse(localStorage.getItem(STATION_STORAGE_KEY)||'null');
-      if(saved && typeof saved==='object'){
+      if(saved&&saved.callsign){
         $('#callsign').value=String(saved.callsign||'').toUpperCase().slice(0,16);
         $('#locator').value=String(saved.locator||'').toUpperCase().slice(0,10);
-        stationSavedSnapshot=JSON.stringify(normalizedStationIdentity());
-        setStationFeedback('Saved locally','ok');
-        $('#saveStation').textContent='SAVED';
-        return;
+        stationSavedSnapshot=JSON.stringify(normalizedStationIdentity());setStationEditMode(false);return;
       }
     }catch(_){}
-    stationSavedSnapshot='';
-    setStationFeedback('Not saved','');
+    stationSavedSnapshot='';setStationEditMode(true);
   }
   function saveStationIdentity(){
-    const id=normalizedStationIdentity();
-    $('#callsign').value=id.callsign;
-    $('#locator').value=id.locator;
-    if(!validCallsign(id.callsign)){
-      setStationFeedback('Invalid callsign','err');
-      $('#saveStation').classList.add('dirty');
-      return false;
-    }
-    if(!validLocator(id.locator)){
-      setStationFeedback('Invalid locator','err');
-      $('#saveStation').classList.add('dirty');
-      return false;
-    }
+    const id=normalizedStationIdentity();$('#callsign').value=id.callsign;$('#locator').value=id.locator;
+    if(!validCallsign(id.callsign)){setStationEditMode(true);$('#callsign').focus();return false;}
+    if(!validLocator(id.locator)){setStationEditMode(true,true);return false;}
     try{
-      localStorage.setItem(STATION_STORAGE_KEY,JSON.stringify(id));
-      stationSavedSnapshot=JSON.stringify(id);
-      $('#saveStation').classList.remove('dirty');
-      $('#saveStation').textContent='SAVED';
-      setStationFeedback('Saved locally','ok');
-      scheduleStateSend(true);
-      refreshRemoteVoices();
-      return true;
-    }catch(_){
-      setStationFeedback('Could not save','err');
-      return false;
-    }
+      localStorage.setItem(STATION_STORAGE_KEY,JSON.stringify(id));stationSavedSnapshot=JSON.stringify(id);
+      setStationEditMode(false);scheduleStateSend(true);refreshRemoteVoices();return true;
+    }catch(_){return false;}
   }
-  $('#saveStation').onclick=saveStationIdentity;
-  ['callsign','locator'].forEach(id=>{
-    $('#'+id).addEventListener('input',()=>{
-      $('#'+id).value=$('#'+id).value.toUpperCase();
-      updateStationDirtyUi();
-    });
-  });
+  $('#saveStation').onclick=()=>{if(!stationEditMode){setStationEditMode(true);return;}saveStationIdentity();};
+  ['callsign','locator'].forEach(id=>$('#'+id).addEventListener('input',()=>{$('#'+id).value=$('#'+id).value.toUpperCase();}));
+  function requireLocatorForRotor(){
+    const loc=normalizedStationIdentity().locator;
+    if(validLocator(loc)&&loc)return true;
+    setStationEditMode(true,true);return false;
+  }
   loadStationIdentity();
 
   function stationPayload(){
     return {
       type:'station_state', band, hz, callsign:($('#callsign').value||'').trim().toUpperCase().slice(0,16),
-      locator:($('#locator').value||'').trim().toUpperCase().slice(0,10), power:+$('#power').value,
+      locator:($('#locator').value||'').trim().toUpperCase().slice(0,10), visitorId, power:+$('#power').value,
       antenna, azimuth:Math.round(rotorActual), wpm:+$('#wpm').value, keyMode, iambicMode
     };
   }
@@ -1383,6 +1346,7 @@
       if(m.activity && m.activity[band]) $('#bandActivity').textContent=band+'M · '+m.activity[band];
       return;
     }
+    if(m.type==='stats'){renderGlobalStats(m);return;}
     if(m.type==='snapshot'){
       remoteStations.clear();
       (m.stations||[]).forEach(s=>{
@@ -1415,7 +1379,6 @@
     }
     if(m.type==='qso_complete'){
       qsoCount++;
-      $('#qsoStat').textContent=qsoCount;
       log('QSO completed'+(m.with?' with '+m.with:'')+'.');
       return;
     }
@@ -1750,37 +1713,27 @@
   }
   function startMeter(){ if(meterTimer) return; meterTimer=setInterval(()=>{refreshRemoteVoices();updateSmeter();},120); }
 
-  $('#callsign').addEventListener('change',updateStationDirtyUi);
-  $('#locator').addEventListener('change',()=>{updateStationDirtyUi();refreshRemoteVoices();});
   window.addEventListener('beforeunload',()=>{ try{sendNet({type:'leave'});}catch(_){} });
 
-  // -------- Lightweight local usage telemetry placeholders --------
-  function fmtDuration(ms,withHours=true){
-    let s=Math.floor(ms/1000), h=Math.floor(s/3600); s%=3600;
-    let m=Math.floor(s/60); s%=60;
-    return withHours ? [h,m,s].map(v=>String(v).padStart(2,'0')).join(':')
-                     : [m,s].map(v=>String(v).padStart(2,'0')).join(':');
-  }
-  function refreshUsage(){
-    $('#sessionTime').textContent=fmtDuration(Date.now()-sessionStarted,true);
-    const txNow=tx&&txStartMs?Date.now()-txStartMs:0;
-    $('#txTimeStat').textContent=fmtDuration(txAccumMs+txNow,false);
-    $('#qsoStat').textContent=qsoCount;
-  }
-  setInterval(refreshUsage,1000);
-
-  function syncLike(){
-    $('#likeCount').textContent=likeCount;
+  // -------- Real network statistics --------
+  let globalStats={};
+  function fmtHours(sec){const h=(Number(sec)||0)/3600;return h<100?h.toFixed(1)+' h':Math.round(h)+' h';}
+  function renderGlobalStats(s={}){
+    globalStats={...globalStats,...s};
+    if(s.users!=null)$('#visitStat').textContent=Number(s.users).toLocaleString();
+    if(s.countries!=null)$('#countryStat').textContent=Number(s.countries).toLocaleString();
+    if(s.usage_seconds!=null)$('#usageStat').textContent=fmtHours(s.usage_seconds);
+    if(s.qsos!=null)$('#qsoStat').textContent=Number(s.qsos).toLocaleString();
+    if(s.avg_wpm!=null)$('#avgWpmStat').textContent=Number(s.avg_wpm).toFixed(1);
+    if(s.max_distance_km!=null)$('#maxDxStat').textContent=Math.round(Number(s.max_distance_km)).toLocaleString()+' km';
+    if(s.likes!=null)$('#likeCount').textContent=Number(s.likes).toLocaleString();
     $('#likeBtn').classList.toggle('active',liked);
-    $('#likeBtn').firstChild.textContent=liked?'♥ 73 sent · ':'♡ Send 73 / Like · ';
+    $('#likeBtn').firstChild.textContent=liked?'♥ 73 sent · ':'♡ Send 73 · ';
   }
+  function syncLike(){renderGlobalStats(globalStats);}
   $('#likeBtn').onclick=()=>{
-    if(!liked){ liked=true; likeCount++; }
-    else { liked=false; likeCount=Math.max(0,likeCount-1); }
-    localStorage.setItem('cwNetLiked',liked?'1':'0');
-    localStorage.setItem('cwNetLikeCount',String(likeCount));
-    syncLike();
-    // SUPABASE HOOK: mp/cw_network like RPC goes here.
+    liked=!liked;localStorage.setItem('cwNetLiked',liked?'1':'0');
+    sendNet({type:'stats_like',visitorId,liked});syncLike();
   };
   window.addEventListener('error',e=>{
     try{ log('Client error: '+(e.message||'unknown error')); }catch(_){}
@@ -1793,7 +1746,7 @@
   $('#activityDetails').classList.add('servicesHidden');
   $('#iambicMode').disabled=true;
   $('#iambicMode').classList.add('disabledCtl');
-  syncLike(); updateServiceUI(); renderNpcList(); connectNetwork(); updateNoiseLevel();
+  syncLike(); updateServiceUI(); renderNpcList(); setInterval(renderNpcList,2000); connectNetwork(); updateNoiseLevel();
 
 
 })();
