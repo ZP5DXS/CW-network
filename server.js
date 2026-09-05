@@ -1,7 +1,6 @@
 import http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
-import { fork } from 'node:child_process';
 
 const PORT=Number(process.env.PORT||10000);
 const VALID_BANDS=new Set([80,40,20,15,10]);
@@ -48,137 +47,185 @@ function rateOK(state,type){
 }
 
 const SERVER_STARTED_AT=new Date().toISOString();
-const AI_MODEL=process.env.CWN_AI_MODEL||'onnx-community/TinyStories-Instruct-33M-ONNX';
-const AI_REQUESTED_DTYPE=(process.env.CWN_AI_DTYPE||'int8').toLowerCase();
-const AI_DTYPE=['q4f16','fp16'].includes(AI_REQUESTED_DTYPE)?'int8':AI_REQUESTED_DTYPE;
 const AI_ENABLED=process.env.CWN_AI_ENABLED!=='0';
 const AI_DEBUG=process.env.CWN_AI_DEBUG==='1';
-const AI_LOAD_TIMEOUT_MS=clamp(Number(process.env.CWN_AI_LOAD_TIMEOUT_MS)||120000,30000,300000);
-const AI_MAX_RSS_MB=clamp(Number(process.env.CWN_AI_MAX_RSS_MB)||300,160,1024);
-let aiState=AI_ENABLED?'STARTING':'DISABLED',aiWorker=null,aiBusy=false,aiReqSeq=0,aiLastError='',aiReadyAt=null;
-let aiWorkerMemoryMB=null,aiWorkerHeapMB=null,aiWorkerPeakRssMB=null,aiWorkerStartedAt=null,aiWorkerLoadStartedAt=null,aiLoadProgress=null,aiLoadTimer=null;
-let aiSelectedModel=null,aiSelectedDtype=null,aiBootMs=null;const aiAttempts=[];
-const aiPending=new Map();
+const GEMINI_API_KEY=String(process.env.GEMINI_API_KEY||'').trim();
+const ADMIN_TOKEN=String(process.env.CWN_ADMIN_TOKEN||'').trim();
+const CONFIGURED_AI_MODEL=String(process.env.CWN_AI_MODEL||'gemini-3.1-flash-lite').trim();
+const AI_MODEL=CONFIGURED_AI_MODEL.startsWith('onnx-community/')?'gemini-3.1-flash-lite':CONFIGURED_AI_MODEL;
+const AI_FALLBACK_MODEL='gemini-3.1-flash-lite';
+const AI_TIMEOUT_MS=clamp(Number(process.env.CWN_AI_TIMEOUT_MS)||6000,2500,15000);
+const AI_MAX_QUEUE=clamp(Number(process.env.CWN_AI_MAX_QUEUE)||4,1,12);
+const AI_HISTORY_LIMIT=50;
+let aiState=!AI_ENABLED?'DISABLED':(!GEMINI_API_KEY?'NO_KEY':'CONFIGURED');
+let aiBusy=false,aiReqSeq=0,aiLastError='',aiReadyAt=null,aiActiveModel=AI_MODEL;
 const aiQueue=[];
-const aiStats={requests:0,humanRequests:0,botRequests:0,success:0,fallbacks:0,timeouts:0,busyFallbacks:0,workerExits:0,generationMsTotal:0,lastGenerationMs:null,lastRequestAt:null,lastSuccessAt:null};
 const aiTrace=[];
-let aiLastPrompt='',aiLastOutput='',aiLastSource='',aiLastStage='';
+const aiHistory=[];
+const aiStats={
+ requests:0,humanRequests:0,botRequests:0,manualRequests:0,probeRequests:0,
+ success:0,fallbacks:0,timeouts:0,rateLimited:0,errors:0,busyFallbacks:0,
+ inputTokens:0,outputTokens:0,totalTokens:0,
+ latencyMsTotal:0,lastLatencyMs:null,maxLatencyMs:0,lastRequestAt:null,lastSuccessAt:null
+};
+let aiLastPrompt='',aiLastOutput='',aiLastFinal='',aiLastSource='',aiLastStage='';
+
 function traceAI(event,data={}){
  const row={at:new Date().toISOString(),event,...data};
- aiTrace.push(row);if(aiTrace.length>40)aiTrace.shift();
+ aiTrace.push(row);if(aiTrace.length>60)aiTrace.shift();
  console.log('[AI]',event,JSON.stringify(data));
 }
-function failAIPending(reason='AI unavailable'){
- for(const [rid,p] of aiPending){clearTimeout(p.timer);p.resolve(null)}
- aiPending.clear();
- while(aiQueue.length){const q=aiQueue.shift();q.resolve(null)}
- aiBusy=false;aiLastError=reason;
+function pushAIHistory(row){
+ aiHistory.push({at:new Date().toISOString(),...row});
+ if(aiHistory.length>AI_HISTORY_LIMIT)aiHistory.shift();
 }
-function stopAIWorker(reason='AI stopped'){
- clearTimeout(aiLoadTimer);aiLoadTimer=null;
- if(aiWorker){
-  try{aiWorker.send({type:'shutdown',reason})}catch{}
-  setTimeout(()=>{try{aiWorker?.kill('SIGTERM')}catch{}},250);
- }
+function shortErr(v){return String(v?.message||v||'unknown error').replace(/\s+/g,' ').slice(0,500)}
+function extractGeminiText(data){
+ return (data?.candidates?.[0]?.content?.parts||[]).map(p=>typeof p?.text==='string'?p.text:'').join(' ').trim();
 }
-function startAIWorker(){
- if(!AI_ENABLED||aiWorker)return;
- aiState='LOADING';aiLastError='';aiReadyAt=null;aiLoadProgress=null;aiWorkerLoadStartedAt=new Date().toISOString();
+function usageFrom(data){
+ const u=data?.usageMetadata||{};
+ return {
+  input:Number(u.promptTokenCount||0),
+  output:Number(u.candidatesTokenCount||0),
+  total:Number(u.totalTokenCount||0)
+ };
+}
+async function callGeminiOnce(model,prompt,timeout=AI_TIMEOUT_MS){
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),timeout);
+ const started=Date.now();
  try{
-  aiWorker=fork(new URL('./ai-worker.js',import.meta.url),[],{
-   stdio:['ignore','inherit','inherit','ipc'],
-   env:{...process.env,CWN_AI_MODEL:AI_MODEL,CWN_AI_DTYPE:AI_DTYPE,CWN_AI_MAX_RSS_MB:String(AI_MAX_RSS_MB)}
+  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
+   method:'POST',
+   headers:{'content-type':'application/json','x-goog-api-key':GEMINI_API_KEY},
+   body:JSON.stringify({
+    contents:[{role:'user',parts:[{text:String(prompt||'')}]}],
+    generationConfig:{
+     temperature:.72,
+     topP:.90,
+     maxOutputTokens:120
+    }
+   }),
+   signal:controller.signal
   });
-  aiWorkerStartedAt=new Date().toISOString();
-  traceAI('worker-start',{pid:aiWorker.pid,model:AI_MODEL,dtype:AI_DTYPE,maxRssMB:AI_MAX_RSS_MB});
-  aiLoadTimer=setTimeout(()=>{
-   if(!['READY','DISABLED'].includes(aiState)){
-    aiState='FALLBACK';aiLastError=`AI load timeout after ${AI_LOAD_TIMEOUT_MS} ms`;traceAI('load-timeout',{ms:AI_LOAD_TIMEOUT_MS});stopAIWorker(aiLastError);
-   }
-  },AI_LOAD_TIMEOUT_MS);
-  aiWorker.on('message',m=>{
-   if(!m||typeof m!=='object')return;
-   if(m.type==='state'){
-    aiState=m.state||aiState;
-    if(m.model)aiSelectedModel=m.model;if(m.dtype)aiSelectedDtype=m.dtype;if(Number.isFinite(m.bootMs))aiBootMs=m.bootMs;
-    if(m.error)aiLastError=String(m.error).slice(0,300);
-    if(m.progress)aiLoadProgress=m.progress;
-    if(aiState==='READY'){clearTimeout(aiLoadTimer);aiLoadTimer=null;aiReadyAt=new Date().toISOString();traceAI('ready',{pid:aiWorker?.pid,rssMB:aiWorkerMemoryMB})}
-    else traceAI('state',{state:aiState,error:m.error||null});
-    return;
-   }
-   if(m.type==='attempt'){aiAttempts.push({at:new Date().toISOString(),index:m.index,model:m.model,dtype:m.dtype,availableDtypes:m.availableDtypes||[]});if(aiAttempts.length>8)aiAttempts.shift();traceAI('attempt',{index:m.index,model:m.model,dtype:m.dtype,availableDtypes:m.availableDtypes||[]});return;}
-    if(m.type==='attempt-failed'){aiAttempts.push({at:new Date().toISOString(),index:m.index,model:m.model,dtype:m.dtype,error:m.error});if(aiAttempts.length>8)aiAttempts.shift();traceAI('attempt-failed',{index:m.index,model:m.model,dtype:m.dtype,error:m.error});return;}
-    if(m.type==='selected'){aiSelectedModel=m.model||aiSelectedModel;aiSelectedDtype=m.dtype||aiSelectedDtype;traceAI('selected',{model:aiSelectedModel,dtype:aiSelectedDtype,attempt:m.attempt});return;}
-    if(m.type==='progress'){
-    aiLoadProgress={status:m.status||null,file:m.file||null,progress:Number.isFinite(m.progress)?Math.round(m.progress*10)/10:null,loaded:m.loaded||null,total:m.total||null};
-    return;
-   }
-   if(m.type==='memory'){
-    aiWorkerMemoryMB=Number.isFinite(m.rssMB)?m.rssMB:aiWorkerMemoryMB;
-    aiWorkerHeapMB=Number.isFinite(m.heapMB)?m.heapMB:aiWorkerHeapMB;
-     aiWorkerPeakRssMB=Number.isFinite(m.peakRssMB)?m.peakRssMB:aiWorkerPeakRssMB;
-    return;
-   }
-   if(m.type==='result'){
-    const p=aiPending.get(m.id);if(!p)return;
-    clearTimeout(p.timer);aiPending.delete(m.id);aiBusy=false;
-    const ms=Date.now()-p.startedAt;aiStats.lastGenerationMs=ms;aiStats.generationMsTotal+=ms;
-    if(m.ok&&m.text){aiStats.success++;aiStats.lastSuccessAt=new Date().toISOString();aiLastOutput=String(m.text).slice(0,500);traceAI('generation-ok',{id:m.id,source:p.source,stage:p.stage,ms,chars:aiLastOutput.length})}
-    else{aiStats.fallbacks++;if(m.error)aiLastError=String(m.error).slice(0,300);traceAI('generation-failed',{id:m.id,source:p.source,stage:p.stage,ms,error:m.error||null})}
-    p.resolve(m.ok?m.text:null);pumpAIQueue();return;
-   }
-  });
-  aiWorker.on('error',err=>{aiState='FALLBACK';failAIPending(err?.message||'AI worker error');traceAI('worker-error',{error:aiLastError})});
-  aiWorker.on('exit',(code,signal)=>{
-   clearTimeout(aiLoadTimer);aiLoadTimer=null;aiWorker=null;aiStats.workerExits++;
-   if(aiState!=='DISABLED'&&aiState!=='FALLBACK')aiState='FALLBACK';
-   if(!aiLastError)aiLastError=`AI worker exit ${code??''} ${signal??''}`.trim();
-   failAIPending(aiLastError);traceAI('worker-exit',{code,signal,error:aiLastError});
-  });
- }catch(err){aiState='FALLBACK';aiLastError=err?.message||String(err);traceAI('start-failed',{error:aiLastError})}
+  const raw=await r.text();
+  let data={};try{data=raw?JSON.parse(raw):{}}catch{data={raw:raw.slice(0,800)}}
+  const ms=Date.now()-started;
+  if(!r.ok){
+   const e=new Error(data?.error?.message||`Gemini HTTP ${r.status}`);
+   e.status=r.status;e.data=data;e.ms=ms;throw e;
+  }
+  return {ok:true,text:extractGeminiText(data),usage:usageFrom(data),data,ms,model,status:r.status};
+ }finally{clearTimeout(timer)}
 }
-setTimeout(startAIWorker,5000);
-
+async function callGemini(prompt,{timeout=AI_TIMEOUT_MS}={}){
+ if(!AI_ENABLED)throw new Error('AI disabled');
+ if(!GEMINI_API_KEY)throw new Error('GEMINI_API_KEY missing');
+ const models=[AI_MODEL];
+ if(AI_FALLBACK_MODEL!==AI_MODEL)models.push(AI_FALLBACK_MODEL);
+ let lastErr=null;
+ for(let i=0;i<models.length;i++){
+  try{
+   const result=await callGeminiOnce(models[i],prompt,timeout);
+   aiActiveModel=result.model;
+   return result;
+  }catch(err){
+   lastErr=err;
+   const status=Number(err?.status||0);
+   traceAI('provider-attempt-failed',{model:models[i],status,error:shortErr(err)});
+   // New Gemini projects may not have access to older 2.5 models. Fall through to 3.1 Flash-Lite.
+   if(!(status===404||status===400||status===403) || i===models.length-1)break;
+  }
+ }
+ throw lastErr||new Error('Gemini request failed');
+}
 function pumpAIQueue(){
- if(aiBusy||aiState!=='READY'||!aiWorker||!aiWorker.connected)return;
- const q=aiQueue.shift();if(!q)return;
- aiBusy=true;const rid=++aiReqSeq;q.startedAt=Date.now();
- const timer=setTimeout(()=>{
-  aiPending.delete(rid);aiBusy=false;aiStats.timeouts++;aiStats.fallbacks++;aiLastError=`AI generation timeout (${q.timeout} ms)`;traceAI('generation-timeout',{id:rid,source:q.source,stage:q.stage,ms:q.timeout});q.resolve(null);pumpAIQueue();
- },q.timeout);
- aiPending.set(rid,{...q,timer});
- try{aiWorker.send({type:'generate',id:rid,prompt:q.prompt,source:q.source,stage:q.stage})}
- catch(err){clearTimeout(timer);aiPending.delete(rid);aiBusy=false;aiStats.fallbacks++;aiLastError=err?.message||String(err);q.resolve(null);pumpAIQueue()}
+ if(aiBusy||!aiQueue.length)return;
+ const q=aiQueue.shift();
+ aiBusy=true;
+ (async()=>{
+  const started=Date.now();let result=null,error=null;
+  try{
+   result=await callGemini(q.prompt,{timeout:q.timeout});
+   const ms=result.ms??(Date.now()-started),u=result.usage||{input:0,output:0,total:0};
+   aiState='READY';aiReadyAt=aiReadyAt||new Date().toISOString();aiLastError='';
+   aiStats.success++;aiStats.lastSuccessAt=new Date().toISOString();
+   aiStats.inputTokens+=u.input;aiStats.outputTokens+=u.output;aiStats.totalTokens+=u.total;
+   aiStats.lastLatencyMs=ms;aiStats.latencyMsTotal+=ms;aiStats.maxLatencyMs=Math.max(aiStats.maxLatencyMs,ms);
+   aiLastOutput=result.text||'';
+   pushAIHistory({
+    id:q.id,source:q.source,stage:q.stage,model:result.model,status:'OK',latencyMs:ms,
+    inputTokens:u.input,outputTokens:u.output,totalTokens:u.total,
+    prompt:q.prompt.slice(0,1200),rawOutput:(result.text||'').slice(0,800),finalCW:q.finalCW||null
+   });
+   traceAI('generation-ok',{id:q.id,source:q.source,stage:q.stage,model:result.model,ms,inputTokens:u.input,outputTokens:u.output});
+  }catch(err){
+   error=err;const status=Number(err?.status||0);
+   aiLastError=shortErr(err);
+   if(err?.name==='AbortError'){aiStats.timeouts++;aiState='DEGRADED'}
+   else if(status===429){aiStats.rateLimited++;aiState='RATE_LIMITED'}
+   else{aiStats.errors++;aiState='DEGRADED'}
+   pushAIHistory({
+    id:q.id,source:q.source,stage:q.stage,model:aiActiveModel,status:`ERROR ${status||''}`.trim(),
+    latencyMs:Date.now()-started,inputTokens:0,outputTokens:0,totalTokens:0,
+    prompt:q.prompt.slice(0,1200),rawOutput:'',error:aiLastError
+   });
+   traceAI('generation-failed',{id:q.id,source:q.source,stage:q.stage,status,error:aiLastError});
+  }finally{
+   aiBusy=false;
+   q.resolve(result?.text||null);
+   pumpAIQueue();
+  }
+ })();
 }
-function requestAI(prompt,{timeout=7500,source='human',stage='QSO'}={}){
+function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={}){
  aiStats.requests++;aiStats.lastRequestAt=new Date().toISOString();
- if(source==='human')aiStats.humanRequests++;else aiStats.botRequests++;
- aiLastPrompt=String(prompt||'').slice(0,1200);aiLastSource=source;aiLastStage=stage;
- if(aiState!=='READY'||!aiWorker||!aiWorker.connected){aiStats.fallbacks++;return Promise.resolve(null)}
- if(source!=='human'&&(aiBusy||aiQueue.length)){aiStats.busyFallbacks++;aiStats.fallbacks++;return Promise.resolve(null)}
+ if(source==='human')aiStats.humanRequests++;
+ else if(source==='bot')aiStats.botRequests++;
+ else if(source==='manual')aiStats.manualRequests++;
+ else if(source==='probe')aiStats.probeRequests++;
+ aiLastPrompt=String(prompt||'').slice(0,1600);aiLastSource=source;aiLastStage=stage;
+ if(!AI_ENABLED||!GEMINI_API_KEY){aiStats.fallbacks++;return Promise.resolve(null)}
  return new Promise(resolve=>{
-  const item={prompt:String(prompt||''),timeout:clamp(Number(timeout)||7500,2500,12000),source,stage,resolve,startedAt:0};
+  const item={id:++aiReqSeq,prompt:String(prompt||''),timeout:clamp(Number(timeout)||AI_TIMEOUT_MS,2500,15000),source,stage,resolve};
   if(source==='human'){
-   const firstBot=aiQueue.findIndex(x=>x.source!=='human');
+   const firstBot=aiQueue.findIndex(x=>x.source!=='human'&&x.source!=='manual');
    if(firstBot>=0)aiQueue.splice(firstBot,0,item);else aiQueue.push(item);
-   while(aiQueue.length>3){const drop=aiQueue.pop();aiStats.busyFallbacks++;aiStats.fallbacks++;drop.resolve(null)}
-  }else aiQueue.push(item);
+  }else if(source==='manual')aiQueue.unshift(item);
+  else aiQueue.push(item);
+  while(aiQueue.length>AI_MAX_QUEUE){
+   const drop=aiQueue.pop();aiStats.busyFallbacks++;aiStats.fallbacks++;drop.resolve(null);
+  }
   pumpAIQueue();
  });
 }
-function aiDebugSnapshot(full=false){
- const avg=aiStats.success?Math.round(aiStats.generationMsTotal/aiStats.success):null;
+function aiDebugSnapshot(full=false,authorized=false){
+ const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.29',state:aiState,enabled:AI_ENABLED,busy:aiBusy,queue:aiQueue.map(x=>({source:x.source,stage:x.stage})),
-  model:AI_MODEL,dtype:AI_DTYPE,requestedDtype:AI_REQUESTED_DTYPE,selectedModel:aiSelectedModel,selectedDtype:aiSelectedDtype,bootMs:aiBootMs,readyAt:aiReadyAt,error:aiLastError||null,
-  worker:{pid:aiWorker?.pid||null,startedAt:aiWorkerStartedAt,loadStartedAt:aiWorkerLoadStartedAt,rssMB:aiWorkerMemoryMB,heapMB:aiWorkerHeapMB,peakRssMB:aiWorkerPeakRssMB,maxRssMB:AI_MAX_RSS_MB,loadTimeoutMs:AI_LOAD_TIMEOUT_MS,progress:aiLoadProgress,attempts:aiAttempts},
+  ok:true,service:'CW Network AI',version:'0.30',provider:'google-gemini',
+  state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
+  configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
+  busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
+  readyAt:aiReadyAt,error:aiLastError||null,
+  stats:{...aiStats,avgLatencyMs:avg},
   main:{rssMB:Math.round(process.memoryUsage().rss/1024/1024),heapMB:Math.round(process.memoryUsage().heapUsed/1024/1024),uptime:Math.round(process.uptime())},
-  stats:{...aiStats,avgGenerationMs:avg},last:{source:aiLastSource||null,stage:aiLastStage||null,generationMs:aiStats.lastGenerationMs},trace:aiTrace.slice(-20)
+  last:{source:aiLastSource||null,stage:aiLastStage||null,latencyMs:aiStats.lastLatencyMs,finalCW:aiLastFinal||null},
+  trace:aiTrace.slice(-20),
+  history:authorized?aiHistory.slice(-50).reverse().map(x=>({...x,prompt:full?x.prompt:undefined,rawOutput:full?x.rawOutput:undefined})):undefined,
+  debugContent:!!(full&&authorized&&AI_DEBUG)
  };
- if(full&&AI_DEBUG){base.last.prompt=aiLastPrompt||null;base.last.output=aiLastOutput||null;base.debugContent=true}else base.debugContent=false;
+ if(full&&authorized&&AI_DEBUG){base.last.prompt=aiLastPrompt||null;base.last.output=aiLastOutput||null}
  return base;
 }
+async function probeGemini(){
+ if(!AI_ENABLED||!GEMINI_API_KEY)return;
+ const text=await requestAI('Reply with exactly: CWN AI READY',{timeout:5000,source:'probe',stage:'HEALTH'});
+ if(text){aiState='READY';traceAI('probe-ok',{model:aiActiveModel,reply:String(text).slice(0,80)})}
+ else traceAI('probe-failed',{error:aiLastError||'no response'});
+}
+setTimeout(probeGemini,1800);
+
 const personaStyles=[
  {role:'SKCC',wpm:[11,16],keyMode:'STRAIGHT',tone:'friendly slow traditional CW operator'},
  {role:'BUG',wpm:[15,20],keyMode:'BUG',tone:'experienced conversational bug operator'},
@@ -286,21 +333,44 @@ function cleanAIText(raw,bot,other){
  if(!s.includes(bot.callsign))s=`${other.callsign||'STN'} DE ${bot.callsign} ${s}`;
  return s||fallbackReply(bot,other);
 }
-async function aiReply(bot,other,context,stage='QSO',source='human'){
+async function aiReply(bot,other,context,stage='QSO',source='human',session=null){
  const oc=other.callsign||'STN';
  const seed=fallbackReply(bot,other,stage);
- const prompt=`CW radio reply only. No prose.
-MY CALL ${bot.callsign}. OTHER CALL ${oc}. NAME ${bot.name}. QTH ${bot.qth}. ROLE ${bot.role}.
-HEARD: ${String(context||'').slice(-120)}
-STAGE ${stage}.
-Use this as a safe example and vary it slightly: ${seed}
-Output one uppercase CW line, max 14 words:`;
+ const hist=(session?.history||[]).slice(-8).map(x=>`${x.from}: ${x.text}`).join('\n')||'(no previous turns)';
+ const operatorStyle={
+  SKCC:'friendly traditional CW, patient, simple exchange, straight-key culture',
+  BUG:'experienced conversational operator, slightly informal',
+  DX:'concise DX style, efficient reports, little chatter',
+  RAGCHEW:'warm conversational operator, may ask one short natural question',
+  HUNTER:'active caller, concise but friendly'
+ }[bot.role]||'realistic amateur CW operator';
+ const prompt=`You are operating an amateur-radio CW station, not chatting in prose.
+IDENTITY: call ${bot.callsign}; name ${bot.name}; QTH ${bot.qth}; locator ${bot.locator}; power ${bot.power}W; role ${bot.role}; style ${operatorStyle}.
+OTHER STATION: call ${oc}; observed WPM ${other.wpm||15}.
+CURRENT STAGE: ${stage}.
+JUST HEARD: ${String(context||'').slice(-180)}
+QSO MEMORY:
+${hist}
+
+Rules:
+- Output ONLY the exact text you would transmit in CW, uppercase.
+- Maximum 18 words. Authentic CW abbreviations are encouraged.
+- Keep callsigns, your name, QTH and identity consistent.
+- Understand CQ, DE, RST, NAME, QTH, PWR, WX, QRS, QRQ, AGN, QRZ, BK, K, KN, 73 and SK naturally.
+- If asked QRS, acknowledge and keep the exchange simple.
+- Do not explain, narrate or mention AI.
+- Do not invent a different callsign.
+- For CALL, identify with ${bot.callsign}.
+- For CLOSE, naturally end with 73 and SK.
+A safe fallback example is: ${seed}
+TRANSMIT:`;
  try{
-  const raw=await requestAI(prompt,{timeout:6500,source,stage});
+  const raw=await requestAI(prompt,{timeout:AI_TIMEOUT_MS,source,stage});
   const cleaned=raw?cleanAIText(raw,bot,other):'';
-  if(!cleaned || cleaned.length<6 || !cleaned.includes(bot.callsign)) return seed;
+  if(!cleaned||cleaned.length<6||!cleaned.includes(bot.callsign)){aiStats.fallbacks++;return seed}
+  aiLastFinal=cleaned;
   return cleaned;
- }catch(err){return seed}
+ }catch(err){aiStats.fallbacks++;return seed}
 }
 
 function findHumanNear(bot,span=500){return [...clients.values()].find(s=>s.band===bot.band&&Math.abs(s.hz-bot.hz)<=span)}
@@ -309,14 +379,24 @@ async function startBotToBot(caller,hunter){
  if(!caller||!hunter||caller.busy||hunter.busy)return;
  hunter.hz=caller.hz;hunter.partnerId=caller.stationId;caller.partnerId=hunter.stationId;
  hunter.state='QSO';caller.state='QSO';broadcast({type:'station_state',...publicState(hunter)});
- const line=await aiReply(hunter,caller,caller.lastText||'', 'CALL','bot');
+ const session={origin:'bot',stage:1,last:Date.now(),history:[]};
+ if(caller.lastText)session.history.push({from:caller.callsign,text:caller.lastText});
+ const useFullAI=clients.size>0 || humansOnBand(caller.band)>0;
+ const getLine=async(bot,other,stage,heard,turn)=>{
+  if(useFullAI || turn===1 || (turn===3&&Math.random()<.35)){
+   const t=await aiReply(bot,other,heard,stage,'bot',session);
+   session.history.push({from:bot.callsign,text:t});return t;
+  }
+  const t=fallbackReply(bot,other,stage);session.history.push({from:bot.callsign,text:t});return t;
+ };
+ const line=await getLine(hunter,caller,'CALL',caller.lastText||'',1);
  transmitVirtual(hunter,line,{after:()=>setTimeout(async()=>{
   if(!caller.active||!hunter.active)return;
-  const reply=fallbackReply(caller,hunter,'QSO');
+  const reply=await getLine(caller,hunter,'QSO',line,2);
   transmitVirtual(caller,reply,{after:()=>setTimeout(async()=>{
-   const third=fallbackReply(hunter,caller,'QSO');
+   const third=await getLine(hunter,caller,'QSO',reply,3);
    transmitVirtual(hunter,third,{after:()=>setTimeout(async()=>{
-    const close=fallbackReply(caller,hunter,'CLOSE');
+    const close=await getLine(caller,hunter,'CLOSE',third,4);
     transmitVirtual(caller,close,{after:()=>{
      caller.state=hunter.state='LISTEN';caller.partnerId=hunter.partnerId=null;hunter.hz=hunter.homeHz;
      broadcast({type:'station_state',...publicState(hunter)});
@@ -371,20 +451,30 @@ function observedHumanWpm(st){
 }
 function chooseBotFor(b,hz){return activeBotsOnBand(b).filter(x=>!x.busy&&x.state!=='QSO').sort((a,c)=>Math.abs(a.hz-hz)-Math.abs(c.hz-hz))[0]||null}
 function sessionKey(userId,botId){return userId+'|'+botId}
-async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpeed=false}={}){
+function newQsoSession(origin='botCQ',seed=[]){return {stage:1,last:Date.now(),origin,requestedWpm:null,history:[...seed].slice(-10)}}
+function sessionPush(sess,from,text){
+ if(!sess||!text)return;
+ sess.history=sess.history||[];sess.history.push({from,text:String(text).slice(0,180)});sess.history=sess.history.slice(-10);sess.last=Date.now();
+}
+async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpeed=false,session=null,sessionKeyValue=null}={}){
  if(!bot||bot.busy)return;
  const normalWpm=bot.homeWpm||bot.wpm;
- const replyWpm=matchHumanSpeed?observedHumanWpm(user):normalWpm;
- bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;bot.wpm=replyWpm;
+ let replyWpm=normalWpm;
+ if(matchHumanSpeed)replyWpm=observedHumanWpm(user);
+ if(session?.requestedWpm)replyWpm=session.requestedWpm;
+ bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;bot.wpm=clamp(Math.round(replyWpm),7,35);
  broadcast({type:'station_state',...publicState(bot)});
  setTimeout(async()=>{
   if(!bot.active||bot.busy)return;
-  const text=await aiReply(bot,user,context,stage,'human');
+  const text=await aiReply(bot,user,context,stage,'human',session);
+  sessionPush(session,bot.callsign,text);
   transmitVirtual(bot,text,{after:()=>{
    bot.wpm=normalWpm;
    if(stage==='CLOSE'){
     const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,t:Date.now()});
-    bot.state='LISTEN';bot.partnerId=null;bot.hz=bot.homeHz;broadcast({type:'station_state',...publicState(bot)});
+    bot.state='LISTEN';bot.partnerId=null;bot.hz=bot.homeHz;
+    if(sessionKeyValue)qsoSessions.delete(sessionKeyValue);
+    broadcast({type:'station_state',...publicState(bot)});
    }else{
     bot.state='WAIT_HUMAN';bot.waitingUntil=Date.now()+30000;
     broadcast({type:'station_state',...publicState(bot)});
@@ -394,24 +484,36 @@ async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpee
 }
 async function processHumanText(user,text){
  const clean=String(text||'').replace(/\s+/g,' ').trim().toUpperCase();if(!clean||clean.length<1)return;
- const userCall=humanLabel(user);
- // A bot that just called CQ will accept a nearby human reply even if its own callsign is omitted.
  let addressed=[...bots.values()].find(b=>b.active&&b.band===user.band&&clean.includes(b.callsign));
  if(!addressed){
   addressed=activeBotsOnBand(user.band).find(b=>['WAIT_REPLY','WAIT_HUMAN'].includes(b.state)&&Math.abs(b.hz-user.hz)<=650);
  }
  if(!addressed&&/\bCQ\b/.test(clean)){
   const bot=chooseBotFor(user.band,user.hz);if(!bot)return;
-  qsoSessions.set(sessionKey(user.stationId,bot.stationId),{stage:1,last:Date.now(),origin:'humanCQ'});
-  return scheduleBotReply(user,bot,'CALL',clean,500,{matchHumanSpeed:true});
+  const key=sessionKey(user.stationId,bot.stationId);
+  const sess=newQsoSession('humanCQ',[{from:humanLabel(user),text:clean}]);
+  qsoSessions.set(key,sess);
+  return scheduleBotReply(user,bot,'CALL',clean,500,{matchHumanSpeed:true,session:sess,sessionKeyValue:key});
  }
  if(!addressed)return;
- const key=sessionKey(user.stationId,addressed.stationId),sess=qsoSessions.get(key)||{stage:1,last:Date.now(),origin:'botCQ'};
- sess.last=Date.now();qsoSessions.set(key,sess);
- if(/\b73\b|\bSK\b/.test(clean)){qsoSessions.delete(key);return scheduleBotReply(user,addressed,'CLOSE',clean,450,{matchHumanSpeed:sess.origin==='humanCQ'})}
- sess.stage++;return scheduleBotReply(user,addressed,'QSO',clean,500,{matchHumanSpeed:sess.origin==='humanCQ'});
+ const key=sessionKey(user.stationId,addressed.stationId);
+ let sess=qsoSessions.get(key);
+ if(!sess){
+  const seed=addressed.lastText?[{from:addressed.callsign,text:addressed.lastText}]:[];
+  sess=newQsoSession('botCQ',seed);qsoSessions.set(key,sess);
+ }
+ sessionPush(sess,humanLabel(user),clean);
+ if(/\bQRS\b/.test(clean)){
+  const observed=observedHumanWpm(user);
+  sess.requestedWpm=clamp(Math.min(observed,addressed.wpm||observed,12),7,20);
+ }
+ if(/\bQRQ\b/.test(clean))sess.requestedWpm=clamp((addressed.homeWpm||addressed.wpm||15)+3,10,35);
+ if(/\b73\b|\bSK\b/.test(clean)){
+  return scheduleBotReply(user,addressed,'CLOSE',clean,450,{matchHumanSpeed:sess.origin==='humanCQ',session:sess,sessionKeyValue:key});
+ }
+ sess.stage++;
+ return scheduleBotReply(user,addressed,'QSO',clean,500,{matchHumanSpeed:sess.origin==='humanCQ',session:sess,sessionKeyValue:key});
 }
-
 // Adaptive straight-key decoder: estimates dit length from short marks instead of trusting only selected WPM.
 function decoderState(st){if(!st.decoder)st.decoder={marks:'',text:'',downAt:0,lastUp:0,charTimer:null,phraseTimer:null,samples:[],unit:1200/Math.max(5,st.wpm||15)};return st.decoder}
 function estimatedUnit(d,st){
@@ -434,22 +536,74 @@ function serverKeyUp(st,now){
  clearTimeout(d.charTimer);d.charTimer=setTimeout(()=>commitServerChar(st),unit*2.25);schedulePhrase(st);
 }
 
-const server=http.createServer((req,res)=>{
- if(req.url==='/'||req.url==='/health'){
-  res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
-  res.end(JSON.stringify({
-   ok:true,service:'CW Network',version:'0.29',
+function adminAuthorized(req,urlObj,bodyToken=''){
+ if(!ADMIN_TOKEN)return false;
+ const header=String(req.headers['x-cwn-admin-token']||'');
+ const query=String(urlObj?.searchParams?.get('token')||'');
+ return header===ADMIN_TOKEN||query===ADMIN_TOKEN||String(bodyToken||'')===ADMIN_TOKEN;
+}
+function sendJson(res,status,obj){
+ res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store','access-control-allow-origin':'*'});
+ res.end(JSON.stringify(obj,null,2));
+}
+function adminConsoleHtml(){
+ return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+ <title>CW Network · AI Console</title><style>
+ body{font-family:system-ui;background:#0b0e11;color:#e9eef2;margin:0;padding:24px}main{max-width:980px;margin:auto}
+ textarea,input,button{width:100%;box-sizing:border-box;background:#11171c;color:#e9eef2;border:1px solid #35414b;border-radius:9px;padding:10px;margin:6px 0}
+ textarea{min-height:130px}button{cursor:pointer;background:#1d4d32}pre{white-space:pre-wrap;background:#070a0c;border:1px solid #2b343d;padding:14px;border-radius:10px;min-height:120px}
+ .row{display:grid;grid-template-columns:1fr 170px;gap:8px}.muted{color:#94a0aa;font-size:13px}</style></head>
+ <body><main><h2>CW Network · Gemini Console</h2><p class="muted">Protected test console. The admin token is sent only to your backend, never to Gemini.</p>
+ <input id="token" type="password" placeholder="CWN_ADMIN_TOKEN">
+ <textarea id="q">You are a CW radio operator. Reply only in uppercase CW style to: CQ CQ DE ZP5DXS ZP5DXS K</textarea>
+ <div class="row"><button id="go">SEND TEST</button><button id="stats">REFRESH STATS</button></div>
+ <pre id="out">Ready.</pre>
+ <script>
+ const out=document.getElementById('out'),tok=()=>document.getElementById('token').value;
+ document.getElementById('go').onclick=async()=>{out.textContent='Calling Gemini...';try{const r=await fetch('/ai/test',{method:'POST',headers:{'content-type':'application/json','x-cwn-admin-token':tok()},body:JSON.stringify({prompt:document.getElementById('q').value})});out.textContent=JSON.stringify(await r.json(),null,2)}catch(e){out.textContent=String(e)}};
+ document.getElementById('stats').onclick=async()=>{try{const r=await fetch('/ai/debug?full=1',{headers:{'x-cwn-admin-token':tok()}});out.textContent=JSON.stringify(await r.json(),null,2)}catch(e){out.textContent=String(e)}};
+ </script></main></body></html>`;
+}
+const server=http.createServer(async(req,res)=>{
+ const urlObj=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
+ if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
+  sendJson(res,200,{
+   ok:true,service:'CW Network',version:'0.30',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
-   ai:aiState,aiBusy,aiQueue:aiQueue.length,aiReadyAt,aiError:aiLastError||null,model:AI_MODEL,aiDtype:AI_DTYPE,aiRequestedDtype:AI_REQUESTED_DTYPE,aiSelectedModel,aiSelectedDtype,aiBootMs,
-   aiPid:aiWorker?.pid||null,aiMemoryMB:aiWorkerMemoryMB,aiPeakMemoryMB:aiWorkerPeakRssMB,aiLoadProgress,startedAt:SERVER_STARTED_AT,
-   memoryMB:Math.round(process.memoryUsage().rss/1024/1024),
+   ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
+   aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
+   aiStats:{requests:aiStats.requests,success:aiStats.success,fallbacks:aiStats.fallbacks,rateLimited:aiStats.rateLimited,errors:aiStats.errors,inputTokens:aiStats.inputTokens,outputTokens:aiStats.outputTokens,totalTokens:aiStats.totalTokens,avgLatencyMs:aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null},
+   startedAt:SERVER_STARTED_AT,memoryMB:Math.round(process.memoryUsage().rss/1024/1024),
    uptime:Math.round(process.uptime()),spaceWeather
-  }));return;
+  });return;
  }
- if(req.url?.startsWith('/ai/debug')){
-  const full=req.url.includes('full=1');
-  res.writeHead(200,{'content-type':'application/json; charset=utf-8','cache-control':'no-store','access-control-allow-origin':'*'});
-  res.end(JSON.stringify(aiDebugSnapshot(full),null,2));return;
+ if(urlObj.pathname==='/ai/debug'){
+  const full=urlObj.searchParams.get('full')==='1';
+  const auth=adminAuthorized(req,urlObj);
+  sendJson(res,200,aiDebugSnapshot(full,auth));return;
+ }
+ if(urlObj.pathname==='/ai/console'){
+  if(!ADMIN_TOKEN){
+   res.writeHead(503,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+   res.end('AI console disabled. Add CWN_ADMIN_TOKEN in Render.');return;
+  }
+  res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+  res.end(adminConsoleHtml());return;
+ }
+ if(urlObj.pathname==='/ai/test'&&req.method==='POST'){
+  let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>12000){req.destroy();return}}
+  let body={};try{body=JSON.parse(raw||'{}')}catch{return sendJson(res,400,{ok:false,error:'Invalid JSON'})}
+  if(!adminAuthorized(req,urlObj,body.token))return sendJson(res,401,{ok:false,error:'Unauthorized'});
+  const prompt=String(body.prompt||'').trim().slice(0,4000);
+  if(!prompt)return sendJson(res,400,{ok:false,error:'prompt required'});
+  const before={input:aiStats.inputTokens,output:aiStats.outputTokens,total:aiStats.totalTokens};
+  const started=Date.now();const text=await requestAI(prompt,{timeout:AI_TIMEOUT_MS,source:'manual',stage:'MANUAL'});
+  return sendJson(res,text?200:503,{
+   ok:!!text,state:aiState,provider:'google-gemini',model:aiActiveModel,
+   latencyMs:Date.now()-started,
+   usage:{inputTokens:aiStats.inputTokens-before.input,outputTokens:aiStats.outputTokens-before.output,totalTokens:aiStats.totalTokens-before.total},
+   prompt,text,error:text?null:aiLastError||'No response'
+  });
  }
  res.writeHead(404);res.end('Not found');
 });
@@ -502,4 +656,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.28 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.30 listening on ${PORT}`));
