@@ -1,5 +1,5 @@
 (() => {
-  // CW Network v0.46 client
+  // CW Network v0.47 client
 
 
   const $ = s => document.querySelector(s);

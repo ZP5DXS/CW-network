@@ -77,7 +77,7 @@ async function refreshStatsCache(){
 function clientIp(req){const x=String(req.headers['x-forwarded-for']||'').split(',')[0].trim();return x||String(req.socket?.remoteAddress||'').replace(/^::ffff:/,'')}
 async function countryForIp(ip){
  if(!ip||ip==='127.0.0.1'||ip==='::1')return {code:'',name:''};if(countryCache.has(ip))return countryCache.get(ip);
- let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.46'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
+ let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.47'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
  countryCache.set(ip,out);setTimeout(()=>countryCache.delete(ip),6*60*60*1000);return out;
 }
 function maidenheadToLatLonServer(locator){
@@ -267,7 +267,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.46',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.47',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -613,13 +613,14 @@ async function botCallCQ(st){
   CQ:`CQ CQ CQ DE ${st.callsign} ${st.callsign} K`
  }[st.role]||`CQ CQ DE ${st.callsign} ${st.callsign} K`;
  transmitVirtual(st,text,{after:()=>{
-  st.state='WAIT_REPLY';st.waitingUntil=Date.now()+18000;
+  st.state='WAIT_REPLY';st.waitingUntil=Date.now()+22000;
+  setClusterSpot(`bot:${st.stationId}`,{call:st.callsign,band:st.band,hz:st.hz,wpm:st.wpm,status:'CQ',detail:'WAITING REPLY',internalIds:[st.stationId]},80000);
   setTimeout(()=>{
    if(st.state==='WAIT_REPLY'&&Date.now()>=st.waitingUntil){
     st.state='LISTEN';st.wpm=st.homeWpm=13;
     st.nextCQAt=Date.now()+6500+Math.random()*9500;
    }
-  },18500);
+  },22500);
  }});
 }
 async function trafficDirector(){
@@ -881,7 +882,7 @@ function callerScore(user,bot,clean){
 function startPileupResolution(bot){
  const p=pileups.get(bot.stationId);
  if(!p||p.timer)return;
- p.timer=setTimeout(()=>resolvePileup(bot.stationId),1500);
+ p.timer=setTimeout(()=>resolvePileup(bot.stationId),1250);
 }
 async function resolvePileup(botId){
  const bot=bots.get(botId),p=pileups.get(botId);
@@ -983,57 +984,137 @@ async function processHumanText(user,text){
  if(!prev||score>prev.score)p.candidates.set(user.stationId,{user,text:clean,score,at:Date.now()});
  startPileupResolution(addressed);
 }
-// Adaptive straight-key decoder: estimates dit length from short marks instead of trusting only selected WPM.
-function decoderState(st){if(!st.decoder)st.decoder={marks:'',text:'',downAt:0,lastUp:0,charTimer:null,phraseTimer:null,samples:[],unit:1200/Math.max(5,st.wpm||15),recentChars:'',cqSeen:false};return st.decoder}
+// v0.47 adaptive event decoder. Because the browser sends exact key edges,
+// we decode relative ON/OFF timings directly instead of treating selected WPM as truth.
+function median(arr){
+ const a=[...arr].filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return NaN;
+ const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2;
+}
+function twoMeans(values){
+ const v=values.filter(x=>Number.isFinite(x)&&x>12).slice(-40).sort((a,b)=>a-b);
+ if(v.length<4)return null;
+ let c1=v[Math.floor(v.length*.25)],c2=v[Math.floor(v.length*.75)];
+ for(let n=0;n<8;n++){
+  const a=[],b=[];for(const x of v)(Math.abs(x-c1)<=Math.abs(x-c2)?a:b).push(x);
+  if(!a.length||!b.length)break;c1=a.reduce((q,x)=>q+x,0)/a.length;c2=b.reduce((q,x)=>q+x,0)/b.length;
+ }
+ if(c1>c2)[c1,c2]=[c2,c1];
+ return {short:c1,long:c2,ratio:c2/Math.max(1,c1)};
+}
+function decoderState(st){
+ if(!st.decoder)st.decoder={marks:'',text:'',downAt:0,lastUp:0,charTimer:null,phraseTimer:null,
+  markSamples:[],gapSamples:[],unit:1200/Math.max(5,st.wpm||15),recentChars:'',cqSeen:false,
+  lastIntent:'',lastCommittedAt:0,lastSpotAt:0};
+ return st.decoder;
+}
 function estimatedUnit(d,st){
  const base=1200/Math.max(5,st.wpm||15);
- const samples=d.samples.filter(x=>x>18&&x<base*5.5).slice(-24).sort((a,b)=>a-b);
- if(samples.length>=3){
-  // The lower third is dominated by dits even with an imperfect straight-key fist.
-  const n=Math.max(1,Math.ceil(samples.length*.38));
-  const lower=samples.slice(0,n);
-  const med=lower[Math.floor(lower.length/2)];
-  return clamp(med,base*.45,base*1.85);
+ const marks=(d.markSamples||[]).filter(x=>x>18&&x<base*7).slice(-36);
+ const km=twoMeans(marks);
+ if(km&&km.ratio>=1.75){
+  // When two mark populations exist, the short cluster is the dit population.
+  d.unit=clamp(km.short,base*.38,base*2.15);return d.unit;
+ }
+ if(marks.length){
+  // With only one population (e.g. many dahs), choose the interpretation closest
+  // to the current adaptive estimate rather than blindly calling every mark a dit.
+  const m=median(marks),prev=d.unit||base;
+  const asDit=m,asDah=m/3;
+  d.unit=clamp(Math.abs(asDit-prev)<=Math.abs(asDah-prev)?asDit:asDah,base*.38,base*2.15);
+  return d.unit;
  }
  return d.unit||base;
 }
+function classifyMark(dur,d,st){
+ const unit=estimatedUnit(d,st),km=twoMeans(d.markSamples||[]);
+ if(km&&km.ratio>=1.75){
+  const cut=Math.sqrt(km.short*km.long);return dur<cut?'.':'-';
+ }
+ // Relative Morse timing: dah is nominally 3 dits; midpoint is ~2 dits.
+ return dur<unit*1.95?'.':'-';
+}
+function maybeSpotDecodedIntent(st){
+ const d=decoderState(st),tail=(d.text||'').replace(/\s+/g,' ').trim().toUpperCase();
+ const compact=tail.replace(/[^A-Z0-9?]/g,'');
+ if((/\bCQ\b/.test(tail)||compact.endsWith('CQ')||d.cqSeen)&&humanLabel(st)!=='STN'){
+  d.cqSeen=true;d.lastIntent='CQ';
+  setClusterSpot(`human:${st.stationId}`,{call:humanLabel(st),band:st.band,hz:st.hz,wpm:observedHumanWpm(st),status:'CQ',detail:'CALLING',internalIds:[st.stationId]},90000);
+ }
+}
 function commitServerChar(st){
- const d=decoderState(st);if(!d.marks)return;
+ const d=decoderState(st);if(!d.marks)return '';
  const ch=MORSE_INV[d.marks]||'?';
- d.text+=ch;d.recentChars=(d.recentChars+ch).slice(-8);
+ d.text+=ch;d.recentChars=(d.recentChars+ch).slice(-12);d.lastCommittedAt=Date.now();
  if(d.recentChars.includes('CQ'))d.cqSeen=true;
- d.marks='';
+ d.marks='';maybeSpotDecodedIntent(st);return ch;
+}
+function finalizeHumanPhrase(st){
+ const d=decoderState(st);commitServerChar(st);
+ let text=(d.text||'').replace(/\s+/g,' ').trim().toUpperCase();
+ const cqSeen=d.cqSeen;
+ d.text='';d.recentChars='';d.cqSeen=false;d.lastIntent='';
+ if(cqSeen&&!/\bCQ\b/.test(text))text='CQ '+text;
+ if(text){console.log('[DECODER]',JSON.stringify({call:humanLabel(st),text,wpm:observedHumanWpm(st)}));processHumanText(st,text)}
 }
 function schedulePhrase(st){
  const d=decoderState(st);clearTimeout(d.phraseTimer);const unit=estimatedUnit(d,st);
- d.phraseTimer=setTimeout(()=>{
-  commitServerChar(st);
-  let text=d.text.trim();
-  const cqSeen=d.cqSeen;
-  d.text='';d.recentChars='';d.cqSeen=false;
-  // A straight key can make one character imperfect. If the raw decoded stream
-  // clearly contained CQ, preserve that intent so a virtual operator answers.
-  if(cqSeen&&!/\bCQ\b/.test(text))text='CQ '+text;
-  if(text)processHumanText(st,text);
- },Math.max(650,unit*9.0));
+ // 6.2 units is comfortably beyond a word gap but much faster than the old 9-unit
+ // phrase delay. Clamp for very slow/fast fists.
+ const delay=clamp(unit*6.2,520,1500);
+ d.phraseTimer=setTimeout(()=>finalizeHumanPhrase(st),delay);
+}
+function provisionalTxSpot(st,now){
+ if(humanLabel(st)==='STN')return;
+ if(now-(st.lastTxSpotAt||0)<4500)return;
+ st.lastTxSpotAt=now;
+ setClusterSpot(`human:${st.stationId}`,{call:humanLabel(st),band:st.band,hz:st.hz,wpm:observedHumanWpm(st),status:'TX',detail:'ON AIR',internalIds:[st.stationId]},7000);
+}
+function registerRfAnswerFallback(user){
+ if(user.rfAnswerTimer)clearTimeout(user.rfAnswerTimer);
+ user.rfAnswerTimer=setTimeout(()=>{
+  user.rfAnswerTimer=null;
+  // A locked QSO has its own watchdog; this fallback exists only for the first reply to a bot CQ.
+  const locked=[...bots.values()].find(b=>b.active&&b.partnerId===user.stationId&&['QSO','WAIT_HUMAN'].includes(b.state));
+  if(locked)return;
+  const d=decoderState(user),partial=decoderSnapshotText(user);
+  if(d.cqSeen||/\bCQ\b/.test(partial))return;
+  const bot=activeBotsOnBand(user.band)
+   .filter(b=>b.state==='WAIT_REPLY'&&!b.busy&&Math.abs((b.hz||0)-(user.hz||0))<=420)
+   .sort((a,b)=>Math.abs(a.hz-user.hz)-Math.abs(b.hz-user.hz))[0];
+  if(!bot)return;
+  const clean=(partial&&partial.length>=2?partial:humanLabel(user));
+  let p=pileups.get(bot.stationId);if(!p){p={candidates:new Map(),timer:null,openedAt:Date.now()};pileups.set(bot.stationId,p)}
+  const score=callerScore(user,bot,clean)+18;
+  const prev=p.candidates.get(user.stationId);
+  if(!prev||score>prev.score)p.candidates.set(user.stationId,{user,text:clean,score,at:Date.now(),rfFallback:true});
+  console.log('[DECODER] RF_ANSWER_FALLBACK',JSON.stringify({user:humanLabel(user),bot:bot.callsign,hz:user.hz,partial:clean}));
+  startPileupResolution(bot);
+ },1100);
 }
 function serverKeyDown(st,now){
+ if(st.rfAnswerTimer){clearTimeout(st.rfAnswerTimer);st.rfAnswerTimer=null}
+ provisionalTxSpot(st,now);
  const locked=[...bots.values()].find(b=>b.active&&b.partnerId===st.stationId&&['QSO','WAIT_HUMAN'].includes(b.state));
  if(locked){
   locked.waitingUntil=now+300000;
   const sess=botSessionFor(st,locked);if(sess){sess.lastHeardAt=now;sess.last=now;sess.rxSeq=(sess.rxSeq||0)+1;sess.nudgeCount=0;clearSessionTurnTimer(sess)}
  }
  const d=decoderState(st),unit=estimatedUnit(d,st);clearTimeout(d.charTimer);clearTimeout(d.phraseTimer);
- if(d.lastUp){const gap=now-d.lastUp;if(gap>=unit*4.8){commitServerChar(st);if(d.text&&!d.text.endsWith(' '))d.text+=' '}else if(gap>=unit*2.0)commitServerChar(st)}
+ if(d.lastUp){
+  const gap=now-d.lastUp;d.gapSamples.push(gap);if(d.gapSamples.length>40)d.gapSamples.shift();
+  // Nominal gaps: 1u element, 3u character, 7u word. Midpoints are ~2u and ~5u.
+  if(gap>=unit*4.7){commitServerChar(st);if(d.text&&!d.text.endsWith(' '))d.text+=' ';maybeSpotDecodedIntent(st)}
+  else if(gap>=unit*1.85)commitServerChar(st);
+ }
  d.downAt=now;
 }
 function serverKeyUp(st,now){
- const d=decoderState(st);if(!d.downAt)return;const dur=now-d.downAt;d.downAt=0;d.lastUp=now;d.samples.push(dur);if(d.samples.length>30)d.samples.shift();
- const unit=estimatedUnit(d,st);d.unit=unit;
- if(dur>=unit*.30&&dur<=unit*6.0)d.marks+=dur<unit*1.9?'.':'-';else d.marks+='?';
- clearTimeout(d.charTimer);d.charTimer=setTimeout(()=>commitServerChar(st),unit*2.25);schedulePhrase(st);
+ const d=decoderState(st);if(!d.downAt)return;const dur=now-d.downAt;d.downAt=0;d.lastUp=now;
+ if(dur>=18&&dur<=2500){d.markSamples.push(dur);if(d.markSamples.length>40)d.markSamples.shift();d.marks+=classifyMark(dur,d,st)}else d.marks+='?';
+ const unit=estimatedUnit(d,st);clearTimeout(d.charTimer);d.charTimer=setTimeout(()=>commitServerChar(st),clamp(unit*1.85,90,520));schedulePhrase(st);
  const locked=[...bots.values()].find(b=>b.active&&b.partnerId===st.stationId&&['QSO','WAIT_HUMAN'].includes(b.state));
  if(locked){const sess=botSessionFor(st,locked);if(sess)armLockedTurnWatch(st,locked,sess)}
+ else registerRfAnswerFallback(st);
 }
 
 function adminAuthorized(req,urlObj,bodyToken=''){
@@ -1069,7 +1150,7 @@ const server=http.createServer(async(req,res)=>{
  if(urlObj.pathname==='/stats'){sendJson(res,200,{ok:true,...statsCache});return;}
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.46',
+   ok:true,service:'CW Network',version:'0.47',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -1111,7 +1192,7 @@ const server=http.createServer(async(req,res)=>{
 const wss=new WebSocketServer({server,maxPayload:16*1024});
 wss.on('connection',(ws,req)=>{
  const stationId=id('u');
- const state={stationId,kind:'human',visitorId:'',sessionId:'',visitCounted:false,countryCode:'',country:'',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),keyDown:false,rate:null,decoder:null,missedPongs:0};
+ const state={stationId,kind:'human',visitorId:'',sessionId:'',visitCounted:false,countryCode:'',country:'',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),keyDown:false,rate:null,decoder:null,rfAnswerTimer:null,lastTxSpotAt:0,missedPongs:0};
  clients.set(ws,state);ws.isAlive=true;send(ws,{type:'welcome',stationId,serverTime:Date.now()});send(ws,spaceWeather);send(ws,{type:'stats',...statsCache});snapshotFor(ws);presence();rebalanceBots();countryForIp(clientIp(req)).then(c=>{state.countryCode=c.code;state.country=c.name;if(state.visitorId){touchVisitor(state,0);startVisit(state)}});
  ws.on('pong',()=>{ws.isAlive=true;state.missedPongs=0;state.lastSeen=Date.now()});
  ws.on('message',buf=>{
@@ -1123,7 +1204,7 @@ wss.on('connection',(ws,req)=>{
   if(m.type==='key_up'){if(!state.keyDown)return;state.keyDown=false;serverKeyUp(state,now);broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:now},ws);return}
   if(m.type==='leave')ws.close(1000,'bye');
  });
- ws.on('close',()=>{removeClusterForStation(stationId);if(state.keyDown)broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:Date.now()},ws);if(state.decoder){clearTimeout(state.decoder.charTimer);clearTimeout(state.decoder.phraseTimer)}for(const bot of bots.values()){if(bot.partnerId===stationId){bot.partnerId=null;bot.replyPending=false;bot.state='LISTEN';bot.wpm=bot.homeWpm=13;bot.hz=bot.homeHz||bot.hz;bot.nextCQAt=Date.now()+5000+Math.random()*7000;clearBotSessions(bot.stationId);broadcast({type:'station_state',...publicState(bot)})}}clients.delete(ws);broadcast({type:'station_left',stationId});presence();rebalanceBots()});
+ ws.on('close',()=>{removeClusterForStation(stationId);if(state.keyDown)broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:Date.now()},ws);if(state.decoder){clearTimeout(state.decoder.charTimer);clearTimeout(state.decoder.phraseTimer)}if(state.rfAnswerTimer)clearTimeout(state.rfAnswerTimer);for(const bot of bots.values()){if(bot.partnerId===stationId){bot.partnerId=null;bot.replyPending=false;bot.state='LISTEN';bot.wpm=bot.homeWpm=13;bot.hz=bot.homeHz||bot.hz;bot.nextCQAt=Date.now()+5000+Math.random()*7000;clearBotSessions(bot.stationId);broadcast({type:'station_state',...publicState(bot)})}}clients.delete(ws);broadcast({type:'station_left',stationId});presence();rebalanceBots()});
 });
 
 function serviceCycle(){
@@ -1171,4 +1252,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.46 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.47 listening on ${PORT}`));
