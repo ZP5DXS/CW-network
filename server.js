@@ -77,7 +77,7 @@ async function refreshStatsCache(){
 function clientIp(req){const x=String(req.headers['x-forwarded-for']||'').split(',')[0].trim();return x||String(req.socket?.remoteAddress||'').replace(/^::ffff:/,'')}
 async function countryForIp(ip){
  if(!ip||ip==='127.0.0.1'||ip==='::1')return {code:'',name:''};if(countryCache.has(ip))return countryCache.get(ip);
- let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.50'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
+ let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.51'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
  countryCache.set(ip,out);setTimeout(()=>countryCache.delete(ip),6*60*60*1000);return out;
 }
 function maidenheadToLatLonServer(locator){
@@ -267,7 +267,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.50',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.51',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -470,7 +470,8 @@ function transmitVirtual(st,text,{service=false,after=null}={}){
 function fallbackReply(bot,other,stage='QSO'){
  const oc=other.callsign||'STN';
  if(stage==='CALL')return `${oc} DE ${bot.callsign} ${bot.callsign} K`;
- if(stage==='CLOSE')return `${oc} DE ${bot.callsign} TU FB QSO 73 SK`;
+ if(stage==='CLOSE_EE')return `EE`;
+ if(stage==='CLOSE')return `${oc} DE ${bot.callsign} TU FB QSO 73 SK EE`;
  const byRole={
   DX:[`${oc} DE ${bot.callsign} UR 599 599 TU BK`,`${oc} DE ${bot.callsign} R 5NN NAME ${bot.name} BK`],
   SKCC:[`${oc} DE ${bot.callsign} UR 579 NAME ${bot.name} QTH ${bot.qth} SKCC STYLE BK`,`${oc} DE ${bot.callsign} FB COPY NICE FIST NAME ${bot.name} BK`],
@@ -514,6 +515,11 @@ RELIABLE MEMORY ABOUT THE OTHER OPERATOR: ${hmem}
 YOUR FACTS ALREADY SENT THIS QSO: ${bfacts}
 RECENT OVER-BY-OVER HISTORY:
 ${hist}
+
+CW SIGN-OFF CUSTOM:
+- Final dits (EE = dit dit) are a friendly handshake ONLY at the absolute end of the QSO.
+- If the other operator has already sent 73/SK plus EE, reply only EE; do not repeat the farewell.
+- On your own final farewell, ending with SK EE is natural.
 
 Transmit ONE natural CW over now.
 Rules:
@@ -784,9 +790,14 @@ function likelyQuestion(s,token){
  const x=String(s||'').toUpperCase();
  return x.includes(token+'?')||new RegExp('\\b'+token+'\\s+PSE\\b').test(x)||new RegExp('\\b'+token+'\\s+AGN\\b').test(x);
 }
+function hasFinalDits(text){
+ const s=String(text||'').toUpperCase().replace(/[^A-Z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+ // In decoded text the traditional final "dit dit" normally appears as EE or E E.
+ return /(?:^|\s)EE(?:\s|$)/.test(s)||/(?:^|\s)E\s+E(?:\s|$)/.test(s);
+}
 function classifyHumanTurn(clean,session){
  const s=String(clean||'').toUpperCase().replace(/\s+/g,' ').trim();
- if(isQsoCloseText(s))return 'CLOSE';
+ if(isQsoCloseText(s))return hasFinalDits(s)?'CLOSE_EE':'CLOSE';
  if(fuzzyRepeatRequest(s)||/\b(QRM|QSB)\b/.test(s))return 'REPEAT';
  if(/\bQRS\b/.test(s))return 'QRS';
  if(/\bQRQ\b/.test(s))return 'QRQ';
@@ -837,7 +848,8 @@ function contextFallbackReply(bot,other,context,stage='QSO',session=null){
  const h=session?.human||{},f=session?.botFacts||{};
  if(stage==='CALL_ACK')return `${oc} DE ${bot.callsign} R ${oc} BK`;
  if(stage==='NIL_COPY')return `${oc} DE ${bot.callsign} SRI NIL COPY AGN? BK`;
- if(stage==='CLOSE')return `${oc} DE ${bot.callsign} TU FB QSO 73 SK`;
+ if(stage==='CLOSE_EE')return `EE`;
+ if(stage==='CLOSE')return `${oc} DE ${bot.callsign} TU FB QSO 73 SK EE`;
  if(stage==='REPEAT'||fuzzyRepeatRequest(s)||/\bQRM\b|\bQSB\b/.test(s)){
   const prev=previousBotOver(session,bot);return prev||`${oc} DE ${bot.callsign} AGN? BK`;
  }
@@ -898,7 +910,7 @@ async function scheduleBotReply(user,bot,stage,context,delay=260,{matchHumanSpee
   if(bot.busy){bot.replyPending=false;return scheduleBotReply(user,bot,stage,context,180,{matchHumanSpeed,session,sessionKeyValue})}
   let text='';
   try{
-   const critical=['CALL_ACK','CLOSE','REPEAT','QRS','QRQ','NIL_COPY'].includes(stage);
+   const critical=['CALL_ACK','CLOSE','CLOSE_EE','REPEAT','QRS','QRQ','NIL_COPY'].includes(stage);
    if(critical){
     text=contextFallbackReply(bot,user,context,stage,session);
    }else{
@@ -917,7 +929,7 @@ async function scheduleBotReply(user,bot,stage,context,delay=260,{matchHumanSpee
    traceQso('TX',user,bot,session,{stage,text,human:session?.human||{},botFacts:session?.botFacts||{}});
    const sent=transmitVirtual(bot,text,{after:()=>{
     bot.replyPending=false;
-    if(stage==='CLOSE'){
+    if(stage==='CLOSE'||stage==='CLOSE_EE'){
      recordQsoStat('bot',user,bot,bot.band).then(dist=>{const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,kind:'bot',distanceKm:dist,t:Date.now()})});
      setClusterSpot(`bot:${bot.stationId}`,{call:bot.callsign,with:humanLabel(user),band:bot.band,hz:bot.hz,wpm:bot.wpm,status:'73',detail:'QSO COMPLETE',internalIds:[bot.stationId,user.stationId]},45000);
      bot.state='LISTEN';releaseHumanBot(user,bot);bot.wpm=bot.homeWpm=13;bot.hz=bot.homeHz||bot.hz;bot.nextCQAt=Date.now()+8000+Math.random()*9000;
@@ -995,7 +1007,7 @@ async function engageHumanWithBot(user,addressed,clean,{fromQueue=false}={}){
  if(/\bQRQ\b/.test(normalized)){const current=sess.requestedWpm||13;sess.requestedWpm=clamp(current+2,13,30)}
  const stage=isNew&&!isQsoCloseText(normalized)?'CALL_ACK':classifyHumanTurn(normalized,sess);
  traceQso('RX',user,addressed,sess,{stage,text:normalized});
- return scheduleBotReply(user,addressed,stage,normalized,stage==='CLOSE'?180:(stage==='CALL_ACK'?220:(260+Math.floor(Math.random()*240))),{matchHumanSpeed:false,session:sess,sessionKeyValue:key});
+ return scheduleBotReply(user,addressed,stage,normalized,(stage==='CLOSE'||stage==='CLOSE_EE')?180:(stage==='CALL_ACK'?220:(260+Math.floor(Math.random()*240))),{matchHumanSpeed:false,session:sess,sessionKeyValue:key});
 }
 
 function humanPairKey(a,b){return [a.stationId,b.stationId].sort().join('|')}
@@ -1061,7 +1073,7 @@ async function processHumanText(user,text){
  if(!prev||score>prev.score)p.candidates.set(user.stationId,{user,text:clean,score,at:Date.now()});
  startPileupResolution(addressed);
 }
-// v0.50 adaptive event decoder. Because the browser sends exact key edges,
+// v0.51 adaptive event decoder. Because the browser sends exact key edges,
 // we decode relative ON/OFF timings directly instead of treating selected WPM as truth.
 function median(arr){
  const a=[...arr].filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return NaN;
@@ -1248,7 +1260,7 @@ const server=http.createServer(async(req,res)=>{
  if(urlObj.pathname==='/stats'){sendJson(res,200,{ok:true,...statsCache});return;}
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.50',
+   ok:true,service:'CW Network',version:'0.51',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -1351,4 +1363,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.50 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.51 listening on ${PORT}`));

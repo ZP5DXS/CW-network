@@ -1,5 +1,5 @@
 (() => {
-  // CW Network v0.50 client
+  // CW Network v0.51 client
 
 
   const $ = s => document.querySelector(s);
@@ -288,7 +288,7 @@
     btn.classList.add('active');
     band=nextBand; hz=bands[band].center; redraw();
     $('#bandActivity').textContent=band+'M · …';
-    updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); scheduleRadioBursts(); resetDecoder();
+    updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); scheduleElectricalBuzz(); scheduleRadioBursts(); resetDecoder();
     bandsUsed.add(band);
     updateServiceUI();
     renderNpcList();
@@ -487,6 +487,7 @@
     scheduleQrn();
     scheduleQrm();
     scheduleStatic();
+    scheduleElectricalBuzz();
     scheduleRadioBursts();
   }
 
@@ -550,7 +551,7 @@
     },delay);
   }
 
-  let qrmTimer=null,staticTimer=null,burstTimer=null;
+  let qrmTimer=null,staticTimer=null,burstTimer=null,electricalTimer=null;
   function scheduleQrm(){
     clearTimeout(qrmTimer);
     if(!audioCtx)return;
@@ -633,6 +634,75 @@
         src.start();
       }
       scheduleStatic();
+    },delay);
+  }
+
+
+  function scheduleElectricalBuzz(){
+    clearTimeout(electricalTimer);
+    if(!audioCtx)return;
+
+    // Intermittent electrical/transformer hash: "trrrr... trrrr" rather than
+    // isolated crackles. It is deliberately stronger and more frequent on 40 m.
+    const density={40:1.0,20:.63,15:.36,10:.20}[band]||.4;
+    const delay=(2600+Math.random()*7200)/Math.max(.18,density);
+
+    electricalTimer=setTimeout(()=>{
+      if(audioCtx&&rxMaster){
+        const nb=$('#nb').classList.contains('active');
+        const nr=$('#nr').classList.contains('active');
+        const now=audioCtx.currentTime;
+        const bursts=2+Math.floor(Math.random()*4);
+        const mains=Math.random()<.55?50:60;
+        const baseAmp={40:.105,20:.070,15:.043,10:.025}[band]||.045;
+        const reduction=(nb?.42:1)*(nr?.72:1);
+
+        for(let b=0;b<bursts;b++){
+          const start=now+b*(.13+Math.random()*.11);
+          const dur=.075+Math.random()*.15;
+
+          // Rough RF hash, amplitude-modulated at a mains-related buzz rate.
+          const len=Math.max(256,Math.floor(audioCtx.sampleRate*dur));
+          const buf=audioCtx.createBuffer(1,len,audioCtx.sampleRate);
+          const d=buf.getChannelData(0);
+          let smooth=0;
+          const buzzRate=mains*(1.8+Math.random()*.7);
+          const phase=Math.random()*Math.PI*2;
+          for(let i=0;i<len;i++){
+            const t=i/audioCtx.sampleRate;
+            const white=Math.random()*2-1;
+            smooth=smooth*.72+white*.28;
+            const chop=.18+.82*Math.pow(Math.max(0,Math.sin(2*Math.PI*buzzRate*t+phase)),.42);
+            const edge=Math.min(1,t/.010)*Math.min(1,(dur-t)/.018);
+            d[i]=(white*.36+smooth*.86)*chop*Math.max(0,edge);
+          }
+
+          const src=audioCtx.createBufferSource();src.buffer=buf;
+          const bp=audioCtx.createBiquadFilter();bp.type='bandpass';
+          bp.frequency.value=520+Math.random()*1150;bp.Q.value=.42+Math.random()*.35;
+          const g=audioCtx.createGain();
+          const amp=baseAmp*(.65+Math.random()*.75)*reduction;
+          g.gain.setValueAtTime(.0001,start);
+          g.gain.linearRampToValueAtTime(Math.max(.001,amp),start+.010);
+          g.gain.setValueAtTime(Math.max(.001,amp),start+Math.max(.015,dur-.020));
+          g.gain.linearRampToValueAtTime(.0001,start+dur);
+
+          src.connect(bp);bp.connect(g);g.connect(rxMaster);
+          src.start(start);src.stop(start+dur+.02);
+
+          // A weak low harmonic gives the burst an electrical-transformer body.
+          const hum=audioCtx.createOscillator();hum.type='triangle';
+          hum.frequency.value=mains*2+(Math.random()-.5)*5;
+          const hg=audioCtx.createGain();
+          hg.gain.setValueAtTime(.0001,start);
+          hg.gain.linearRampToValueAtTime(amp*.13,start+.012);
+          hg.gain.setValueAtTime(amp*.13,start+Math.max(.015,dur-.025));
+          hg.gain.linearRampToValueAtTime(.0001,start+dur);
+          hum.connect(hg);hg.connect(rxMaster);
+          hum.start(start);hum.stop(start+dur+.02);
+        }
+      }
+      scheduleElectricalBuzz();
     },delay);
   }
 
@@ -1380,7 +1450,7 @@
       $('#prop').textContent=(spaceWeather.kp==null&&spaceWeather.sfi==null)
         ?'NOAA · UNAVAILABLE'
         :`Kp ${spaceWeather.kp?.toFixed(1)??'–'} · SFI ${spaceWeather.sfi??'–'}`;
-      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); scheduleRadioBursts();
+      refreshRemoteVoices(); updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); scheduleElectricalBuzz(); scheduleRadioBursts();
       return;
     }
     if(m.type==='qso_complete'){
