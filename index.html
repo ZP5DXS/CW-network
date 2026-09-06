@@ -114,7 +114,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 .bandnpc span{color:var(--muted)}
 .bandnpc{cursor:pointer;border-radius:7px;padding-left:5px;padding-right:5px}.bandnpc:hover{background:rgba(255,255,255,.04)}
 
-.activityPanel{overflow:hidden;display:grid;grid-template-rows:auto minmax(150px,.72fr) minmax(0,1.28fr);min-height:0}
+.activityPanel{overflow:hidden;display:grid;grid-template-rows:auto minmax(118px,.85fr) minmax(74px,.55fr) minmax(0,1.1fr);min-height:0}
 .activityHead{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:9px}
 .activityHead small{color:var(--muted);font-size:10px}
 .activitySummary{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
@@ -132,6 +132,14 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 .switchUi:after{content:"";position:absolute;width:12px;height:12px;border-radius:50%;background:#86939d;left:2px;top:2px;transition:.18s}
 .switchLine input:checked + .switchUi{background:#1f5536;border-color:#39784f}
 .switchLine input:checked + .switchUi:after{left:16px;background:#aef7c8}
+
+.clusterBox{min-height:0;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#0a0e11;padding:5px}
+.clusterRow{display:grid;grid-template-columns:92px minmax(62px,.7fr) minmax(82px,1fr) auto;gap:7px;align-items:center;padding:7px 6px;border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer;font-family:ui-monospace,monospace;font-size:11px}
+.clusterRow:last-child{border-bottom:0}.clusterRow:hover{background:rgba(255,255,255,.045)}
+.clusterRow>b{color:var(--display);font-size:11px}.clusterCall{font-weight:900;color:var(--text);overflow:hidden;text-overflow:ellipsis}
+.clusterState{color:#aef7c8}.clusterRow.cq .clusterState{color:var(--warn)}.clusterRow.status73 .clusterState{color:var(--accent)}
+.clusterRow small{color:var(--muted);white-space:nowrap}.clusterEmpty{padding:14px 8px;color:var(--muted);font-size:11px;text-align:center}
+@media(max-width:650px){.clusterRow{grid-template-columns:88px 1fr auto}.clusterRow small{display:none}}
 
 .wf-trace{position:absolute;top:0;height:6px;min-width:2px;border-radius:2px;background:#9ef9b7;box-shadow:0 0 8px rgba(158,249,183,.55);opacity:.8;pointer-events:none}
 .wf-trace.bot{opacity:.55}
@@ -318,23 +326,27 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
       <section class="card activityPanel">
         <div class="activityHead">
           <div>
-            <h3 style="margin:0">Network activity</h3>
-            <small>Live network activity</small>
+            <h3 style="margin:0">CW Cluster</h3>
+            <small>Auto-spots · CQ and active QSOs · click to tune</small>
           </div>
           <label class="switchLine">
-            <span>Show services</span>
+            <span>Show stations</span>
             <input type="checkbox" id="activityDetailsToggle">
             <span class="switchUi"></span>
           </label>
         </div>
-<div class="log activityLog" id="log">
+
+        <div class="clusterBox" id="clusterList">
+          <div class="clusterEmpty">Listening for CQ…</div>
+        </div>
+
+        <div class="log activityLog" id="log">
           <div><time>--:--:--</time>Local radio ready.</div>
-                  </div>
+        </div>
 
         <div class="activityDetails" id="activityDetails">
           <div class="activityDivider"></div>
           <div id="npcList"></div>
-          
         </div>
       </section>
 
@@ -348,7 +360,7 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
 
   <footer class="footer footerStats">
     <div class="footerBrand">
-      <div class="footerTitle">CW NETWORK RADIO <span>· v0.43</span></div>
+      <div class="footerTitle">CW NETWORK RADIO <span>· v0.44</span></div>
       <div class="footerTag">Free · No ads · Browser-based · Worldwide CW · AI assisted by Gemini</div>
       <div class="flagMarquee" aria-label="Worldwide CW">
         <div class="flagTrack" id="flagTrack"></div>
@@ -364,6 +376,6 @@ linear-gradient(#0a1014,#05080a);position:relative;overflow:hidden}
   </footer>
 </div>
 
-<script src="radio.js?v=043" defer></script>
+<script src="radio.js?v=044" defer></script>
 </body>
 </html>

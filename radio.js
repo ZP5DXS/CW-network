@@ -43,6 +43,7 @@
   let stateSendTimer=null, connectedOnce=false;
   const remoteStations=new Map();
   const remoteVoices=new Map();
+  let clusterSpots=[];
   let rxMaster=null, rxGate=null, noiseGain=null, noiseSource=null, noiseBandpass=null;
   let meterTimer=null, qrnTimer=null, qrnBuffer=null;
   let audioUnlocked=false;
@@ -290,6 +291,7 @@
     updateNoiseLevel(); scheduleQrn(); scheduleQrm(); scheduleStatic(); scheduleRadioBursts(); resetDecoder();
     bandsUsed.add(band);
     updateServiceUI();
+    renderCluster();
     renderNpcList();
     log('Band changed to '+band+'m.');
     scheduleStateSend(true);
@@ -1160,6 +1162,40 @@
 
   // -------- Network services / active station spots --------
   function updateServiceUI(){ return serviceFreqByBand[band]; }
+  function clusterStatusLabel(s){
+    const state=String(s.status||'').toUpperCase();
+    if(state==='CQ')return 'CQ';
+    if(state==='QSO')return s.with?`QSO · ${s.with}`:'QSO';
+    if(state==='73')return s.with?`73 · ${s.with}`:'73';
+    return state||'ON AIR';
+  }
+  function renderCluster(){
+    const now=Date.now();
+    const rows=(clusterSpots||[])
+      .filter(s=>Number(s.band)===band&&(!s.expiresAt||Number(s.expiresAt)>now))
+      .sort((a,b)=>(Number(b.updatedAt)||0)-(Number(a.updatedAt)||0));
+    const box=$('#clusterList');if(!box)return;
+    if(!rows.length){
+      box.innerHTML='<div class="clusterEmpty">No active spots on this band · CQ calls will appear automatically.</div>';
+      return;
+    }
+    box.innerHTML=rows.map(s=>{
+      const f=Number(s.hz)||0;
+      const rawState=String(s.status||'').toLowerCase();
+      const state=rawState==='73'?'status73':rawState;
+      return `<div class="clusterRow ${state}" data-freq="${Math.round(f)}">
+        <b>${(f/1e6).toFixed(6)}</b>
+        <span class="clusterCall">${s.call||'—'}</span>
+        <span class="clusterState">${clusterStatusLabel(s)}</span>
+        <small>${s.wpm||13} WPM${s.detail?' · '+s.detail:''}</small>
+      </div>`;
+    }).join('');
+    $$('#clusterList .clusterRow').forEach(row=>row.onclick=()=>{
+      const target=Number(row.dataset.freq);if(!Number.isFinite(target))return;
+      if(vfoTuneMode==='SCAN')setTuneMode('NORMAL');
+      hz=target;clampHz();redraw();scheduleStateSend(true);
+    });
+  }
   function renderNpcList(){
     const rows=[{
       freq:serviceFreqByBand[band],
@@ -1346,6 +1382,7 @@
       return;
     }
     if(m.type==='stats'){renderGlobalStats(m);return;}
+    if(m.type==='cluster_update'){clusterSpots=Array.isArray(m.spots)?m.spots:[];renderCluster();return;}
     if(m.type==='snapshot'){
       remoteStations.clear();
       (m.stations||[]).forEach(s=>{
@@ -1756,6 +1793,7 @@
   });
 
   $('#activityDetails').classList.add('servicesHidden');
+  renderCluster();
   $('#iambicMode').disabled=true;
   $('#iambicMode').classList.add('disabledCtl');
   syncLike(); updateServiceUI(); renderNpcList(); setInterval(renderNpcList,2000); connectNetwork(); updateNoiseLevel();
