@@ -25,14 +25,14 @@
     const SERVICE_CALL='CWN';
   const serviceFreqByBand={40:7031500,20:14026500,15:21026500,10:28021500};
   const npcTemplates=[
-    {call:'K1VRT',role:'DX',wpm:24,style:'PADDLE',offset:2100},
-    {call:'LU7NPC',role:'SKCC',wpm:14,style:'STRAIGHT',offset:-900},
-    {call:'PY2BOT',role:'POTA',wpm:18,style:'PADDLE',offset:3300},
-    {call:'EA4VRT',role:'RAGCHEW',wpm:16,style:'BUG',offset:-2400},
-    {call:'JA1NPC',role:'DX',wpm:28,style:'PADDLE',offset:4100},
-    {call:'W1CW',role:'MENTOR',wpm:12,style:'STRAIGHT',offset:900},
-    {call:'G3VRT',role:'CQ',wpm:20,style:'BUG',offset:-3500},
-    {call:'VK2NPC',role:'DX',wpm:22,style:'PADDLE',offset:4700}
+    {call:'K1VRT',role:'DX',wpm:13,style:'PADDLE',offset:2100},
+    {call:'LU7NPC',role:'SKCC',wpm:13,style:'STRAIGHT',offset:-900},
+    {call:'PY2BOT',role:'POTA',wpm:13,style:'PADDLE',offset:3300},
+    {call:'EA4VRT',role:'RAGCHEW',wpm:13,style:'BUG',offset:-2400},
+    {call:'JA1NPC',role:'DX',wpm:13,style:'PADDLE',offset:4100},
+    {call:'W1CW',role:'MENTOR',wpm:13,style:'STRAIGHT',offset:900},
+    {call:'G3VRT',role:'CQ',wpm:13,style:'BUG',offset:-3500},
+    {call:'VK2NPC',role:'DX',wpm:13,style:'PADDLE',offset:4700}
   ];
   const activeTraces=new Map();
   let npcTimers=[];

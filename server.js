@@ -267,7 +267,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.42',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.43',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -504,7 +504,10 @@ Rules:
 - Maximum 18 words. Authentic CW abbreviations are encouraged.
 - Keep callsigns, your name, QTH and identity consistent.
 - Understand CQ, DE, RST, NAME, QTH, PWR, WX, QRS, QRQ, AGN, QRZ, BK, K, KN, 73 and SK naturally.
-- If asked QRS, acknowledge and keep the exchange simple.
+- You are the station that called CQ. Once one station answers you, stay with that same station until the QSO ends with 73/SK. Never abandon it to call CQ or answer someone else.
+- Follow the actual exchange context. Answer what was just sent; do not repeat an earlier turn unless AGN is requested.
+- If asked QRS, acknowledge QRS naturally and continue at the slower requested speed. If asked QRQ, acknowledge and continue faster.
+- Preserve normal CW turn-taking: use BK when expecting another transmission, and 73 SK only when closing.
 - Do not explain, narrate or mention AI.
 - Do not invent a different callsign.
 - For CALL, identify with ${bot.callsign}.
@@ -637,30 +640,51 @@ async function scheduleBotReply(user,bot,stage,context,delay=650,{matchHumanSpee
  if(!bot||bot.busy||bot.replyPending)return;
  if(bot.partnerId&&bot.partnerId!==user.stationId)return;
  bot.replyPending=true;
- const normalWpm=bot.homeWpm||bot.wpm;
- let replyWpm=normalWpm;
+ const normalWpm=13; // every virtual operator starts and returns to 13 WPM
+ let replyWpm=13;
  if(matchHumanSpeed)replyWpm=observedHumanWpm(user);
  if(session?.requestedWpm)replyWpm=session.requestedWpm;
- bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;bot.wpm=clamp(Math.round(replyWpm),7,35);bot.waitingUntil=Date.now()+35000;
+ bot.partnerId=user.stationId;bot.state='QSO';bot.hz=user.hz;bot.wpm=clamp(Math.round(replyWpm),7,35);bot.waitingUntil=Date.now()+120000;
  broadcast({type:'station_state',...publicState(bot)});
  setTimeout(async()=>{
-  if(!bot.active||bot.busy)return;
-  const text=await aiReply(bot,user,context,stage,'human',session);
-  sessionPush(session,bot.callsign,text);
-  transmitVirtual(bot,text,{after:()=>{
-   bot.wpm=normalWpm;
-   if(stage==='CLOSE'){
-    recordQsoStat('bot',user,bot,bot.band).then(dist=>{const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,kind:'bot',distanceKm:dist,t:Date.now()});});
-    bot.state='LISTEN';bot.partnerId=null;bot.wpm=bot.homeWpm=13;
-    bot.hz=bot.homeHz||bot.hz;
-    bot.nextCQAt=Date.now()+8000+Math.random()*9000;
-    if(sessionKeyValue)qsoSessions.delete(sessionKeyValue);
-    broadcast({type:'station_state',...publicState(bot)});
-   }else{
-    bot.state='WAIT_HUMAN';bot.waitingUntil=Date.now()+30000;
+  if(!bot.active){bot.replyPending=false;return;}
+  if(bot.partnerId!==user.stationId){bot.replyPending=false;return;}
+  // A previous RF frame may still be clearing. Do not lose the QSO; retry shortly.
+  if(bot.busy){bot.replyPending=false;return scheduleBotReply(user,bot,stage,context,450,{matchHumanSpeed,session,sessionKeyValue});}
+  let text='';
+  try{
+   text=await aiReply(bot,user,context,stage,'human',session);
+   // Preserve an unmistakable acknowledgement when the operator explicitly asks for speed change.
+   if(/\bQRS\b/.test(String(context||''))&&!/\bQRS\b/.test(text))text=`R QRS ${text}`;
+   if(/\bQRQ\b/.test(String(context||''))&&!/\bQRQ\b/.test(text))text=`R QRQ ${text}`;
+   sessionPush(session,bot.callsign,text);
+   const sent=transmitVirtual(bot,text,{after:()=>{
+    bot.replyPending=false;
+    if(stage==='CLOSE'){
+     recordQsoStat('bot',user,bot,bot.band).then(dist=>{const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,kind:'bot',distanceKm:dist,t:Date.now()});});
+     bot.state='LISTEN';bot.partnerId=null;bot.wpm=bot.homeWpm=13;
+     bot.hz=bot.homeHz||bot.hz;
+     bot.nextCQAt=Date.now()+8000+Math.random()*9000;
+     if(sessionKeyValue)qsoSessions.delete(sessionKeyValue);
+     broadcast({type:'station_state',...publicState(bot)});
+    }else{
+     // Keep the lock and the session alive. At 13 WPM a human may need well over
+     // 30 seconds to copy, think and send a complete turn.
+     bot.wpm=bot.homeWpm=13;
+     bot.state='WAIT_HUMAN';bot.waitingUntil=Date.now()+120000;
+     broadcast({type:'station_state',...publicState(bot)});
+    }
+   }});
+   if(!sent){
+    bot.replyPending=false;
+    bot.state='WAIT_HUMAN';bot.waitingUntil=Date.now()+120000;
     broadcast({type:'station_state',...publicState(bot)});
    }
-  }});
+  }catch(_){
+   bot.replyPending=false;
+   bot.state='WAIT_HUMAN';bot.waitingUntil=Date.now()+120000;
+   broadcast({type:'station_state',...publicState(bot)});
+  }
  },delay+Math.floor(Math.random()*450));
 }
 function clearBotSessions(botId){
@@ -751,8 +775,8 @@ async function processHumanText(user,text){
  const clean=String(text||'').replace(/\s+/g,' ').trim().toUpperCase();
  if(!clean)return;
  trackHumanQsoText(user,clean);
- if(/QRS/.test(clean))recordRequestStat(user,'QRS');
- if(/QRQ/.test(clean))recordRequestStat(user,'QRQ');
+ if(/\bQRS\b/.test(clean))recordRequestStat(user,'QRS');
+ if(/\bQRQ\b/.test(clean))recordRequestStat(user,'QRQ');
 
  const humanIsCallingCQ=/(^|\s)CQ(\s|$)/.test(clean);
 
@@ -868,7 +892,7 @@ const server=http.createServer(async(req,res)=>{
  if(urlObj.pathname==='/stats'){sendJson(res,200,{ok:true,...statsCache});return;}
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.42',
+   ok:true,service:'CW Network',version:'0.43',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -922,7 +946,7 @@ wss.on('connection',(ws,req)=>{
   if(m.type==='key_up'){if(!state.keyDown)return;state.keyDown=false;serverKeyUp(state,now);broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:now},ws);return}
   if(m.type==='leave')ws.close(1000,'bye');
  });
- ws.on('close',()=>{if(state.keyDown)broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:Date.now()},ws);if(state.decoder){clearTimeout(state.decoder.charTimer);clearTimeout(state.decoder.phraseTimer)}clients.delete(ws);broadcast({type:'station_left',stationId});presence();rebalanceBots()});
+ ws.on('close',()=>{if(state.keyDown)broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:Date.now()},ws);if(state.decoder){clearTimeout(state.decoder.charTimer);clearTimeout(state.decoder.phraseTimer)}for(const bot of bots.values()){if(bot.partnerId===stationId){bot.partnerId=null;bot.replyPending=false;bot.state='LISTEN';bot.wpm=bot.homeWpm=13;bot.hz=bot.homeHz||bot.hz;bot.nextCQAt=Date.now()+5000+Math.random()*7000;clearBotSessions(bot.stationId);broadcast({type:'station_state',...publicState(bot)})}}clients.delete(ws);broadcast({type:'station_left',stationId});presence();rebalanceBots()});
 });
 
 function serviceCycle(){
