@@ -77,7 +77,7 @@ async function refreshStatsCache(){
 function clientIp(req){const x=String(req.headers['x-forwarded-for']||'').split(',')[0].trim();return x||String(req.socket?.remoteAddress||'').replace(/^::ffff:/,'')}
 async function countryForIp(ip){
  if(!ip||ip==='127.0.0.1'||ip==='::1')return {code:'',name:''};if(countryCache.has(ip))return countryCache.get(ip);
- let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.48'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
+ let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.49'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
  countryCache.set(ip,out);setTimeout(()=>countryCache.delete(ip),6*60*60*1000);return out;
 }
 function maidenheadToLatLonServer(locator){
@@ -267,7 +267,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.48',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.49',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -542,16 +542,8 @@ async function startBotToBot(caller,hunter){
  hunter.state='QSO';caller.state='QSO';broadcast({type:'station_state',...publicState(hunter)});
  const session={origin:'bot',stage:1,last:Date.now(),history:[]};
  if(caller.lastText)session.history.push({from:caller.callsign,text:caller.lastText});
- const humanPresent=humansOnBand(caller.band)>0;
- // External AI budget policy:
- // - no humans on this band: 0 Gemini calls for bot↔bot traffic
- // - humans listening on this band: roughly 25% of bot turns may use Gemini
+ // Bot-to-bot traffic is deterministic. Reserve Gemini capacity for real human QSOs.
  const getLine=async(bot,other,stage,heard,turn)=>{
-  const useGemini=humanPresent && Math.random()<.25;
-  if(useGemini){
-   const t=await aiReply(bot,other,heard,stage,'bot',session);
-   session.history.push({from:bot.callsign,text:t});return t;
-  }
   const t=fallbackReply(bot,other,stage);session.history.push({from:bot.callsign,text:t});return t;
  };
  const line=await getLine(hunter,caller,'CALL',caller.lastText||'',1);
@@ -602,7 +594,7 @@ async function trafficDirector(){
     continue;
    }
    if(st.state==='WAIT_HUMAN'&&st.waitingUntil&&now>=st.waitingUntil){
-    const partner=[...clients.values()].find(x=>x.stationId===st.partnerId);
+    const partner=[...clients.values()].find(x=>x.stationId===st.partnerId||x.activeBotId===st.stationId);
     const sess=partner?botSessionFor(partner,st):null;
     if(partner&&partner.band===st.band&&(sess?.nudgeCount||0)<2){
      if(sess)sess.nudgeCount=(sess.nudgeCount||0)+1;
@@ -623,7 +615,7 @@ async function trafficDirector(){
      broadcast({type:'station_state',...publicState(st)});
      continue;
     }
-    st.state='LISTEN';st.partnerId=null;st.replyPending=false;st.wpm=st.homeWpm=13;
+    if(partner)releaseHumanBot(partner,st);st.state='LISTEN';st.partnerId=null;st.replyPending=false;st.wpm=st.homeWpm=13;
     clearBotSessions(st.stationId);pileups.delete(st.stationId);
     st.hz=st.homeHz||st.hz;
     st.nextCQAt=now+7000+Math.random()*9000;
@@ -665,6 +657,34 @@ function chooseBotFor(b,hz){
  return pool.sort((a,c)=>(rank(a)-rank(c))||(Math.abs(a.hz-hz)-Math.abs(c.hz-hz)))[0]||null;
 }
 function sessionKey(userId,botId){return userId+'|'+botId}
+function bindHumanToBot(user,bot){
+ if(!user||!bot)return null;
+ user.activeBotId=bot.stationId;
+ bot.partnerId=user.stationId;
+ if(!['QSO','WAIT_HUMAN'].includes(bot.state))bot.state='WAIT_HUMAN';
+ bot.waitingUntil=Date.now()+300000;
+ return bot;
+}
+function releaseHumanBot(user,bot){
+ if(user&&(!bot||user.activeBotId===bot.stationId))user.activeBotId=null;
+ if(bot){bot.partnerId=null;bot.replyPending=false;}
+}
+function authoritativeBotForUser(user,{repair=true}={}){
+ if(!user)return null;
+ let bot=user.activeBotId?bots.get(user.activeBotId):null;
+ if(!bot){
+  const prefix=user.stationId+'|';
+  const key=[...qsoSessions.keys()].reverse().find(k=>k.startsWith(prefix));
+  if(key){const bid=key.slice(prefix.length);bot=bots.get(bid)||null;if(bot)user.activeBotId=bid;}
+ }
+ if(!bot||!bot.active||bot.band!==user.band)return null;
+ if(repair){
+  if(bot.partnerId!==user.stationId)bot.partnerId=user.stationId;
+  if(!['QSO','WAIT_HUMAN'].includes(bot.state))bot.state='WAIT_HUMAN';
+  bot.waitingUntil=Date.now()+300000;
+ }
+ return bot;
+}
 function newQsoSession(origin='botCQ',seed=[]){
  const now=Date.now();
  return {stage:0,phase:'CALL_ACK',last:now,lastHeardAt:now,lastProcessedAt:0,rxSeq:0,handledRxSeq:0,
@@ -711,6 +731,7 @@ function classifyHumanTurn(clean,session){
  if(fuzzyRepeatRequest(s)||/\b(QRM|QSB)\b/.test(s))return 'REPEAT';
  if(/\bQRS\b/.test(s))return 'QRS';
  if(/\bQRQ\b/.test(s))return 'QRQ';
+ if(/(^|\s)([1-5][1-9][1-9]|5NN|[1-5]NN)(\s|$)/.test(s)||/\bRST\b/.test(s))return 'RST';
  if(session?.phase==='CALL_ACK')return 'CALL_ACK';
  return 'QSO';
 }
@@ -755,7 +776,7 @@ function isQsoCloseText(text){
 }
 function contextFallbackReply(bot,other,context,stage='QSO',session=null){
  const oc=other.callsign||'STN',s=String(context||'').toUpperCase();
- if(stage==='CALL_ACK')return `${oc} DE ${bot.callsign} R ${oc} UR 579 BK`;
+ if(stage==='CALL_ACK')return `${oc} DE ${bot.callsign} R ${oc} BK`;
  if(stage==='NIL_COPY')return `${oc} DE ${bot.callsign} SRI NIL COPY AGN? BK`;
  if(stage==='CLOSE')return `${oc} DE ${bot.callsign} TU FB QSO 73 SK`;
  if(stage==='REPEAT'||fuzzyRepeatRequest(s)||/\bQRM\b|\bQSB\b/.test(s)){
@@ -764,6 +785,7 @@ function contextFallbackReply(bot,other,context,stage='QSO',session=null){
  }
  if(stage==='QRS'||/\bQRS\b/.test(s))return `${oc} DE ${bot.callsign} R QRS BK`;
  if(stage==='QRQ'||/\bQRQ\b/.test(s))return `${oc} DE ${bot.callsign} R QRQ BK`;
+ if(stage==='RST'){if(session)session.rstSent=true;return `${oc} R TNX UR 579 BK`;}
  if(/\bQTH\b/.test(s)&&/\?|\bQTH\?\b/.test(s))return `${oc} R QTH ${bot.qth} BK`;
  if(/\bNAME\b/.test(s)&&/\?|\bNAME\?\b/.test(s))return `${oc} R NAME ${bot.name} BK`;
  if(/\bPWR\b|\bPOWER\b/.test(s)&&/\?/.test(s))return `${oc} R PWR ${bot.power}W BK`;
@@ -807,7 +829,7 @@ async function scheduleBotReply(user,bot,stage,context,delay=260,{matchHumanSpee
   if(bot.busy){bot.replyPending=false;return scheduleBotReply(user,bot,stage,context,180,{matchHumanSpeed,session,sessionKeyValue})}
   let text='';
   try{
-   const critical=['CALL_ACK','CLOSE','REPEAT','QRS','QRQ','NIL_COPY'].includes(stage);
+   const critical=['CALL_ACK','CLOSE','REPEAT','QRS','QRQ','RST','NIL_COPY'].includes(stage);
    if(critical){
     text=contextFallbackReply(bot,user,context,stage,session);
    }else if(aiBusy||aiQueue.length){
@@ -829,7 +851,7 @@ async function scheduleBotReply(user,bot,stage,context,delay=260,{matchHumanSpee
     if(stage==='CLOSE'){
      recordQsoStat('bot',user,bot,bot.band).then(dist=>{const ws=wsForStation(user.stationId);if(ws)send(ws,{type:'qso_complete',with:bot.callsign,kind:'bot',distanceKm:dist,t:Date.now()})});
      setClusterSpot(`bot:${bot.stationId}`,{call:bot.callsign,with:humanLabel(user),band:bot.band,hz:bot.hz,wpm:bot.wpm,status:'73',detail:'QSO COMPLETE',internalIds:[bot.stationId,user.stationId]},45000);
-     bot.state='LISTEN';bot.partnerId=null;bot.wpm=bot.homeWpm=13;bot.hz=bot.homeHz||bot.hz;bot.nextCQAt=Date.now()+8000+Math.random()*9000;
+     bot.state='LISTEN';releaseHumanBot(user,bot);bot.wpm=bot.homeWpm=13;bot.hz=bot.homeHz||bot.hz;bot.nextCQAt=Date.now()+8000+Math.random()*9000;
      if(sessionKeyValue){clearSessionTurnTimer(session);qsoSessions.delete(sessionKeyValue)}
      broadcast({type:'station_state',...publicState(bot)});return;
     }
@@ -878,12 +900,16 @@ async function resolvePileup(botId){
   transmitVirtual(bot,'QRZ? QRZ? DE '+bot.callsign+' K',{after:()=>{bot.state='WAIT_REPLY';bot.waitingUntil=Date.now()+18000}});
   return;
  }
- bot.partnerId=winner.user.stationId;bot.state='QSO';
+ const freshKey=sessionKey(winner.user.stationId,bot.stationId);
+ const stale=qsoSessions.get(freshKey);if(stale)clearSessionTurnTimer(stale);
+ qsoSessions.delete(freshKey);
+ bindHumanToBot(winner.user,bot);bot.state='QSO';
  setClusterSpot(`bot:${bot.stationId}`,{call:bot.callsign,with:humanLabel(winner.user),band:bot.band,hz:bot.hz,wpm:bot.wpm,status:'QSO',detail:'CONNECTED',internalIds:[bot.stationId,winner.user.stationId]},10*60*1000);
  broadcast({type:'station_state',...publicState(bot)});
  return engageHumanWithBot(winner.user,bot,winner.text);
 }
 async function engageHumanWithBot(user,addressed,clean,{fromQueue=false}={}){
+ bindHumanToBot(user,addressed);
  const key=sessionKey(user.stationId,addressed.stationId);
  let sess=qsoSessions.get(key),isNew=!sess;
  if(!sess){
@@ -936,10 +962,7 @@ async function processHumanText(user,text){
  }
 
  // First, continue an already locked QSO. Other callers are ignored until it ends.
- const partnered=[...bots.values()].find(b=>
-  b.active&&b.band===user.band&&b.partnerId===user.stationId&&
-  ['QSO','WAIT_HUMAN'].includes(b.state)
- );
+ const partnered=authoritativeBotForUser(user);
  if(partnered)return engageHumanWithBot(user,partnered,clean);
 
  // Caller-only policy: generic human CQ never wakes a bot.
@@ -968,7 +991,7 @@ async function processHumanText(user,text){
  if(!prev||score>prev.score)p.candidates.set(user.stationId,{user,text:clean,score,at:Date.now()});
  startPileupResolution(addressed);
 }
-// v0.47 adaptive event decoder. Because the browser sends exact key edges,
+// v0.49 adaptive event decoder. Because the browser sends exact key edges,
 // we decode relative ON/OFF timings directly instead of treating selected WPM as truth.
 function median(arr){
  const a=[...arr].filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return NaN;
@@ -1063,45 +1086,39 @@ function addFirstAnswerCandidate(user,bot,text,rfOnly=false){
  startPileupResolution(bot);
  return true;
 }
+function handleHumanOver(st,source='server'){
+ if(!st||!st.overOpen)return;
+ const generation=st.overGeneration||0;
+ if((st.lastHandledOverGeneration||0)>=generation)return;
+ st.lastHandledOverGeneration=generation;st.overOpen=false;
+ if(st.rxOverTimer){clearTimeout(st.rxOverTimer);st.rxOverTimer=null}
+ const text=takeDecodedOver(st);
+ const locked=authoritativeBotForUser(st);
+ if(locked){
+  const sess=botSessionFor(st,locked);
+  if(sess){
+   sess.handledRxSeq=sess.rxSeq;sess.lastProcessedAt=Date.now();sess.lastHeardAt=Date.now();sess.last=Date.now();sess.nudgeCount=0;
+   clearSessionTurnTimer(sess);
+  }
+  console.log('[QSO] OVER_END',JSON.stringify({source,user:humanLabel(st),bot:locked.callsign,text:text||'',decoded:usefulDecodedText(text),generation}));
+  const key=sessionKey(st.stationId,locked.stationId);
+  if(usefulDecodedText(text))engageHumanWithBot(st,locked,text);
+  else scheduleBotReply(st,locked,'NIL_COPY',text||'',180,{session:sess,sessionKeyValue:key});
+  return;
+ }
+ const waiting=nearestWaitingBot(st,620);
+ const isOwnCQ=/\bCQ\b/.test(String(text||''));
+ if(waiting&&!isOwnCQ){addFirstAnswerCandidate(st,waiting,text,!usefulDecodedText(text));return;}
+ if(usefulDecodedText(text))processHumanText(st,text);
+}
 function scheduleHumanOverEnd(st){
  if(st.rxOverTimer)clearTimeout(st.rxOverTimer);
- const d=decoderState(st),unit=estimatedUnit(d,st);
- // End-of-over is intentionally much longer than a 7-unit word gap.
- // This prevents a normal space between words from becoming a separate QSO turn.
- const delay=clamp(unit*13.0,1500,2600);
- st.rxOverTimer=setTimeout(()=>{
-  st.rxOverTimer=null;
-  const text=takeDecodedOver(st);
-  const locked=[...bots.values()].find(b=>b.active&&b.partnerId===st.stationId&&['QSO','WAIT_HUMAN'].includes(b.state));
-  if(locked){
-   const sess=botSessionFor(st,locked);
-   if(sess){
-    sess.handledRxSeq=sess.rxSeq;sess.lastProcessedAt=Date.now();sess.lastHeardAt=Date.now();sess.last=Date.now();sess.nudgeCount=0;
-    clearSessionTurnTimer(sess);
-   }
-   console.log('[QSO] OVER_END',JSON.stringify({user:humanLabel(st),bot:locked.callsign,text:text||'',decoded:usefulDecodedText(text)}));
-   if(usefulDecodedText(text))processHumanText(st,text);
-   else {
-    const key=sessionKey(st.stationId,locked.stationId);
-    scheduleBotReply(st,locked,'NIL_COPY',text||'',180,{session:sess,sessionKeyValue:key});
-   }
-   return;
-  }
-
-  // First answer to a bot CQ is RF-first, decoder-second. A registered callsign plus
-  // an over on the bot frequency is enough to establish the QSO even if decoding is poor.
-  const waiting=nearestWaitingBot(st,520);
-  const isOwnCQ=/\bCQ\b/.test(String(text||''));
-  if(waiting&&!isOwnCQ){
-   if(addFirstAnswerCandidate(st,waiting,text,!usefulDecodedText(text)))return;
-  }
-
-  if(usefulDecodedText(text))processHumanText(st,text);
- },delay);
+ st.rxOverTimer=setTimeout(()=>handleHumanOver(st,'server-backup'),3000);
 }
 function serverKeyDown(st,now){
  if(st.rxOverTimer){clearTimeout(st.rxOverTimer);st.rxOverTimer=null}
- const locked=[...bots.values()].find(b=>b.active&&b.partnerId===st.stationId&&['QSO','WAIT_HUMAN'].includes(b.state));
+ if(!st.overOpen){st.overOpen=true;st.overGeneration=(st.overGeneration||0)+1}
+ const locked=authoritativeBotForUser(st);
  if(locked){
   locked.waitingUntil=now+300000;
   const sess=botSessionFor(st,locked);
@@ -1161,7 +1178,7 @@ const server=http.createServer(async(req,res)=>{
  if(urlObj.pathname==='/stats'){sendJson(res,200,{ok:true,...statsCache});return;}
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.48',
+   ok:true,service:'CW Network',version:'0.49',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -1203,7 +1220,7 @@ const server=http.createServer(async(req,res)=>{
 const wss=new WebSocketServer({server,maxPayload:16*1024});
 wss.on('connection',(ws,req)=>{
  const stationId=id('u');
- const state={stationId,kind:'human',visitorId:'',sessionId:'',visitCounted:false,countryCode:'',country:'',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),keyDown:false,rate:null,decoder:null,rfAnswerTimer:null,lastTxSpotAt:0,missedPongs:0};
+ const state={stationId,kind:'human',visitorId:'',sessionId:'',visitCounted:false,countryCode:'',country:'',callsign:'',locator:'',band:40,hz:7035000,power:10,antenna:2,azimuth:0,wpm:15,keyMode:'STRAIGHT',iambicMode:'A',lastSeen:Date.now(),keyDown:false,rate:null,decoder:null,rfAnswerTimer:null,lastTxSpotAt:0,activeBotId:null,overOpen:false,overGeneration:0,lastHandledOverGeneration:0,missedPongs:0};
  clients.set(ws,state);ws.isAlive=true;send(ws,{type:'welcome',stationId,serverTime:Date.now()});send(ws,spaceWeather);send(ws,{type:'stats',...statsCache});snapshotFor(ws);presence();rebalanceBots();countryForIp(clientIp(req)).then(c=>{state.countryCode=c.code;state.country=c.name;if(state.visitorId){touchVisitor(state,0);startVisit(state)}});
  ws.on('pong',()=>{ws.isAlive=true;state.missedPongs=0;state.lastSeen=Date.now()});
  ws.on('message',buf=>{
@@ -1213,9 +1230,10 @@ wss.on('connection',(ws,req)=>{
   if(m.type==='stats_like'){if(m.visitorId&&!state.visitorId)state.visitorId=String(m.visitorId).replace(/[^a-zA-Z0-9_-]/g,'').slice(0,80);recordLikeStat(state,!!m.liked);return}
   if(m.type==='key_down'){if(state.keyDown)return;state.keyDown=true;const [lo,hi]=BAND_LIMITS[state.band];state.hz=clamp(Math.round(Number(m.hz)||state.hz),lo,hi);serverKeyDown(state,now);recordTx(state.band);broadcastBand(state.band,{type:'key_down',stationId,kind:'human',band:state.band,hz:state.hz,power:state.power,callsign:state.callsign,locator:state.locator,seq:++serverSeq,t:now},ws);return}
   if(m.type==='key_up'){if(!state.keyDown)return;state.keyDown=false;serverKeyUp(state,now);broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:now},ws);return}
+  if(m.type==='tx_over'){handleHumanOver(state,'client');return}
   if(m.type==='leave')ws.close(1000,'bye');
  });
- ws.on('close',()=>{removeClusterForStation(stationId);if(state.keyDown)broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:Date.now()},ws);if(state.decoder){clearTimeout(state.decoder.charTimer);clearTimeout(state.decoder.phraseTimer)}if(state.rxOverTimer)clearTimeout(state.rxOverTimer);for(const bot of bots.values()){if(bot.partnerId===stationId){bot.partnerId=null;bot.replyPending=false;bot.state='LISTEN';bot.wpm=bot.homeWpm=13;bot.hz=bot.homeHz||bot.hz;bot.nextCQAt=Date.now()+5000+Math.random()*7000;clearBotSessions(bot.stationId);broadcast({type:'station_state',...publicState(bot)})}}clients.delete(ws);broadcast({type:'station_left',stationId});presence();rebalanceBots()});
+ ws.on('close',()=>{removeClusterForStation(stationId);if(state.keyDown)broadcastBand(state.band,{type:'key_up',stationId,seq:++serverSeq,t:Date.now()},ws);if(state.decoder){clearTimeout(state.decoder.charTimer);clearTimeout(state.decoder.phraseTimer)}if(state.rxOverTimer)clearTimeout(state.rxOverTimer);for(const bot of bots.values()){if(bot.partnerId===stationId||state.activeBotId===bot.stationId){releaseHumanBot(state,bot);bot.state='LISTEN';bot.wpm=bot.homeWpm=13;bot.hz=bot.homeHz||bot.hz;bot.nextCQAt=Date.now()+5000+Math.random()*7000;clearBotSessions(bot.stationId);broadcast({type:'station_state',...publicState(bot)})}}clients.delete(ws);broadcast({type:'station_left',stationId});presence();rebalanceBots()});
 });
 
 function serviceCycle(){
@@ -1263,4 +1281,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.48 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.49 listening on ${PORT}`));

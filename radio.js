@@ -1,5 +1,5 @@
 (() => {
-  // CW Network v0.48 client
+  // CW Network v0.49 client
 
 
   const $ = s => document.querySelector(s);
@@ -41,7 +41,7 @@
   // -------- Realtime network / RF engine --------
   const WS_URL = document.querySelector('meta[name="cw-ws-url"]')?.content || 'wss://cw-network.onrender.com';
   let ws=null, reconnectTimer=null, stationId=null, netSeq=0, lastStateSent='', reconnectAttempts=0, socketGeneration=0;
-  let stateSendTimer=null, connectedOnce=false;
+  let stateSendTimer=null, connectedOnce=false, txOverTimer=null;
   const remoteStations=new Map();
   const remoteVoices=new Map();
   let rxMaster=null, rxGate=null, noiseGain=null, noiseSource=null, noiseBandpass=null;
@@ -750,6 +750,7 @@
   }
   function keyDown(){
     if(tx) return;
+    clearTimeout(txOverTimer);txOverTimer=null;
     tx=true; lastKeyDown=performance.now(); txStartMs=Date.now();
     txRxSwitchDown();
     wfKeyDown('LOCAL',hz,'human');
@@ -768,6 +769,11 @@
     ramp(0,5);
     txRxSwitchUp();
     sendNet({type:'key_up', band, hz, seq:++netSeq, t:Date.now()});
+    clearTimeout(txOverTimer);
+    txOverTimer=setTimeout(()=>{
+      txOverTimer=null;
+      sendNet({type:'tx_over', band, hz, seq:++netSeq, t:Date.now()});
+    },2100);
   }
   function isDitCode(e){ return e.code==='ControlLeft' || e.code==='BracketLeft'; }
   function isDahCode(e){ return e.code==='ControlRight' || e.code==='BracketRight'; }
