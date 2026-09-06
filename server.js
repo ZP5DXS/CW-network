@@ -77,7 +77,7 @@ async function refreshStatsCache(){
 function clientIp(req){const x=String(req.headers['x-forwarded-for']||'').split(',')[0].trim();return x||String(req.socket?.remoteAddress||'').replace(/^::ffff:/,'')}
 async function countryForIp(ip){
  if(!ip||ip==='127.0.0.1'||ip==='::1')return {code:'',name:''};if(countryCache.has(ip))return countryCache.get(ip);
- let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.49'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
+ let out={code:'',name:''};try{const r=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country_code,country`,{headers:{'user-agent':'CW-Network/0.50'}});const j=await r.json();if(j?.success!==false)out={code:String(j?.country_code||'').slice(0,2),name:String(j?.country||'').slice(0,64)}}catch(_){}
  countryCache.set(ip,out);setTimeout(()=>countryCache.delete(ip),6*60*60*1000);return out;
 }
 function maidenheadToLatLonServer(locator){
@@ -267,7 +267,7 @@ function requestAI(prompt,{timeout=AI_TIMEOUT_MS,source='human',stage='QSO'}={})
 function aiDebugSnapshot(full=false,authorized=false){
  const avg=aiStats.success?Math.round(aiStats.latencyMsTotal/aiStats.success):null;
  const base={
-  ok:true,service:'CW Network AI',version:'0.49',provider:'google-gemini',
+  ok:true,service:'CW Network AI',version:'0.50',provider:'google-gemini',
   state:aiState,enabled:AI_ENABLED,keyConfigured:!!GEMINI_API_KEY,
   configuredModel:AI_MODEL,activeModel:aiActiveModel,fallbackModel:AI_FALLBACK_MODEL,
   busy:aiBusy,queue:aiQueue.map(x=>({id:x.id,source:x.source,stage:x.stage})),
@@ -492,41 +492,47 @@ function cleanAIText(raw,bot,other,stage='QSO'){
 }
 async function aiReply(bot,other,context,stage='QSO',source='human',session=null){
  const oc=other.callsign||'STN';
- const seed=stage==='CLOSE'?`${oc} DE ${bot.callsign} TU FB QSO 73 SK`:`${oc} R FB BK`;
- const hist=(session?.history||[]).slice(-10).map(x=>`${x.from}: ${x.text}`).join('\n')||'(no previous turns)';
+ const seed=contextFallbackReply(bot,other,context,stage,session);
+ const hist=(session?.history||[]).slice(-12).map(x=>`${x.from}: ${x.text}`).join('\n')||'(no previous turns)';
  const operatorStyle={
-  SKCC:'friendly traditional SKCC-style CW operator, patient and simple',
-  POTA:'concise portable activator, efficient POTA-style exchange',
-  SOTA:'concise summit activator, efficient SOTA-style exchange',
-  CQ:'general friendly CW operator',
-  DX:'concise DX style, efficient reports, little chatter'
+  SKCC:'friendly traditional CW operator; patient, warm, likes fists and SKCC-style exchanges',
+  POTA:'portable activator; concise but friendly; efficient exchanges with occasional brief comment',
+  SOTA:'summit activator; concise, practical and friendly',
+  CQ:'general friendly CW operator; natural conversational rhythm, not a script',
+  DX:'experienced DX operator; concise, efficient, but still responsive to what was actually sent'
  }[bot.role]||'realistic amateur CW operator';
  const phase=session?.phase||'EXCHANGE';
- const prompt=`You are actually operating an amateur-radio CW QSO. This is over-the-air turn-taking, not a text chat.
-IDENTITY: call ${bot.callsign}; name ${bot.name}; QTH ${bot.qth}; locator ${bot.locator}; power ${bot.power}W; role ${bot.role}; style ${operatorStyle}.
-OTHER STATION: call ${oc}; observed WPM ${observedHumanWpm(other)}.
-QSO PHASE: ${phase}. CURRENT ACTION: ${stage}.
-JUST HEARD: ${String(context||'').slice(-180)}
-QSO MEMORY:
+ const hmem=humanMemoryLine(session),bfacts=botFactsLine(session);
+ const prompt=`You are the human operator of amateur-radio station ${bot.callsign}, having a LIVE CW QSO. Reply like a real ham on the air, not like a chatbot and not like a form.
+
+YOUR FIXED IDENTITY: CALL ${bot.callsign}; NAME ${bot.name}; QTH ${bot.qth}; LOC ${bot.locator}; PWR ${bot.power}W; ROLE ${bot.role}.
+YOUR OPERATING STYLE: ${operatorStyle}.
+OTHER STATION: ${oc}; observed about ${observedHumanWpm(other)} WPM.
+QSO PHASE: ${phase}. SERVER ACTION: ${stage}.
+JUST HEARD THIS OVER: ${String(context||'').slice(-220)}
+RELIABLE MEMORY ABOUT THE OTHER OPERATOR: ${hmem}
+YOUR FACTS ALREADY SENT THIS QSO: ${bfacts}
+RECENT OVER-BY-OVER HISTORY:
 ${hist}
 
+Transmit ONE natural CW over now.
 Rules:
-- Output ONLY the exact short text you would transmit in CW, uppercase.
-- Prefer 5-14 words. Use authentic CW abbreviations.
-- Stay with ${oc} until a real 73/SK close. Never abandon the QSO because a turn is odd, short or partly copied.
-- React to the LAST thing heard. A short "AGN?" means repeat your previous over. "QRS" means slow down. "QRQ" means speed up.
-- Do not demand a fixed script or a particular next field. Accept RST, NAME, QTH, PWR, WX, comments or simple acknowledgements in any natural order.
-- Do not dump RST + NAME + QTH + PWR all at once. Add at most ONE new personal/QSO fact per over unless the other station explicitly asks for several.
-- If the other station gives an RST, acknowledge it and normally give your report if not already done.
-- If the other station gives NAME/QTH/PWR/WX, acknowledge what was heard and continue naturally.
-- Use BK when clearly turning it back. K/KN are also valid. Do not close unless the other station closes or the exchange clearly reaches 73.
-- Callsigns do NOT need to be repeated on every over. Use them naturally, especially at the beginning and end.
-- Keep your identity absolutely consistent. Never invent a different callsign/name/QTH.
-- Do not explain, narrate, mention AI, or output prose commentary.
-Safe fallback: ${seed}
+- Output ONLY the exact uppercase CW text to transmit. No explanation, quotes, labels or markdown.
+- First react to what was JUST HEARD. If he says NAME MATT, acknowledge MATT. If he gives QTH, acknowledge that QTH. If he gives an RST, acknowledge that report. Never answer a different question.
+- Use reliable memory. Do not confuse HIS name/QTH/report with YOUR own. Do not tell him your name again just because he told you his.
+- A QSO is a sequence of overs, not a checklist. Information may come in any order and may be omitted entirely.
+- Do not dump all your information. Usually add ZERO or ONE new fact per over. Sometimes simply R, FB, TNX, QSL, or a short relevant comment is the most natural reply.
+- If a fact of yours is already marked as sent, do not repeat it unless asked or repetition is natural because of QSB/QRM/AGN.
+- Use BK naturally for quick back-and-forth. K or KN can be used when appropriate. Do not append callsigns mechanically to every over.
+- Stay in this QSO with ${oc}. NEVER abandon or silently end it because a message is short, malformed, unexpected, or out of conventional order.
+- Only send 73/SK when the other operator is clearly closing, or SERVER ACTION is CLOSE.
+- Keep it compact: normally 3-14 words. Avoid long prose. Use normal CW abbreviations such as R, FB, TNX, HR, UR, ES, PSE, AGN, QSL, BK.
+- Keep your fixed identity consistent. Never invent a different call, name, QTH, locator or power.
+- Do not force RST, NAME, QTH and PWR into a rigid sequence.
+Safe fallback if uncertain: ${seed}
 TRANSMIT:`;
  try{
-  const raw=await requestAI(prompt,{timeout:source==='human'?Math.min(AI_TIMEOUT_MS,3600):AI_TIMEOUT_MS,source,stage});
+  const raw=await requestAI(prompt,{timeout:source==='human'?Math.min(AI_TIMEOUT_MS,3800):AI_TIMEOUT_MS,source,stage});
   const cleaned=raw?cleanAIText(raw,bot,other,stage):'';
   if(!cleaned||cleaned.length<2){aiStats.fallbacks++;return seed}
   aiLastFinal=cleaned;
@@ -688,14 +694,16 @@ function authoritativeBotForUser(user,{repair=true}={}){
 function newQsoSession(origin='botCQ',seed=[]){
  const now=Date.now();
  return {stage:0,phase:'CALL_ACK',last:now,lastHeardAt:now,lastProcessedAt:0,rxSeq:0,handledRxSeq:0,
-  turnTimer:null,origin,requestedWpm:null,nudgeCount:0,pendingTurns:[],history:[...seed].slice(-12),
-  rstSent:false,nameSent:false,qthSent:false,pwrSent:false,turnsFromHuman:0,turnsFromBot:0};
+  turnTimer:null,origin,requestedWpm:null,nudgeCount:0,pendingTurns:[],history:[...seed].slice(-16),
+  rstSent:false,nameSent:false,qthSent:false,pwrSent:false,turnsFromHuman:0,turnsFromBot:0,
+  human:{name:'',qth:'',rst:'',pwr:'',wx:''},botFacts:{rst:false,name:false,qth:false,pwr:false},
+  exchangeDepth:0,lastHumanText:'',lastBotText:'',lastIntent:'',aiTurns:0,fallbackTurns:0};
 }
 function sessionPush(sess,from,text){
  if(!sess||!text)return;
  sess.history=sess.history||[];
  sess.history.push({from,text:String(text).slice(0,180)});
- sess.history=sess.history.slice(-12);sess.last=Date.now();
+ sess.history=sess.history.slice(-16);sess.last=Date.now();
 }
 function clearSessionTurnTimer(sess){if(sess?.turnTimer){clearTimeout(sess.turnTimer);sess.turnTimer=null}}
 function editDistance(a,b){
@@ -725,13 +733,63 @@ function decoderSnapshotText(st){
 function previousBotOver(session,bot){
  return [...(session?.history||[])].reverse().find(x=>x.from===bot.callsign)?.text||bot.lastText||'';
 }
+function cleanFact(v,max=24){
+ return String(v||'').toUpperCase().replace(/[^A-Z0-9/ .-]/g,' ').replace(/\s+/g,' ').trim().slice(0,max);
+}
+function extractHumanFacts(text,session){
+ if(!session)return session?.human||{};
+ const s=String(text||'').toUpperCase().replace(/\s+/g,' ').trim();
+ const h=session.human||(session.human={name:'',qth:'',rst:'',pwr:'',wx:''});
+ let m;
+ m=s.match(/(?:^|\s)(?:UR\s+)?(?:RST\s*)?([1-5][1-9][1-9]|5NN|[1-5]NN)(?=\s|$)/);
+ if(m)h.rst=cleanFact(m[1],4);
+ m=s.match(/\b(?:MY\s+)?NAME(?:\s+IS)?\s+([A-Z][A-Z0-9-]{1,11})(?=\s|$)/);
+ if(m&&!['PSE','AGN','QSL','BK','K','KN'].includes(m[1]))h.name=cleanFact(m[1],12);
+ m=s.match(/\bQTH(?:\s+IS)?\s+(.+?)(?=\s+(?:BK|KN|K|AR|NAME|PWR|POWER|RST|WX|73|SK)\b|$)/);
+ if(m&&!/^[?]+$/.test(m[1].trim()))h.qth=cleanFact(m[1],28);
+ m=s.match(/\b(?:PWR|POWER)(?:\s+IS)?\s+(\d{1,3})(?:\s*W|W)?(?=\s|$)/);
+ if(m)h.pwr=cleanFact(m[1]+'W',5);
+ m=s.match(/\bWX(?:\s+IS)?\s+(.+?)(?=\s+(?:BK|KN|K|AR|NAME|QTH|PWR|POWER|RST|73|SK)\b|$)/);
+ if(m&&!/^[?]+$/.test(m[1].trim()))h.wx=cleanFact(m[1],28);
+ session.lastHumanText=s;
+ return h;
+}
+function updateBotFactsFromText(session,bot,text){
+ if(!session||!bot)return;
+ const s=String(text||'').toUpperCase();
+ const f=session.botFacts||(session.botFacts={rst:false,name:false,qth:false,pwr:false});
+ if(/\b(?:UR\s+)?(?:[1-5][1-9][1-9]|5NN|[1-5]NN)\b/.test(s))f.rst=true;
+ if(bot.name&&new RegExp('\\bNAME\\s+'+bot.name+'\\b').test(s))f.name=true;
+ if(bot.qth&&s.includes('QTH '+bot.qth))f.qth=true;
+ if(new RegExp('\\bPWR\\s+'+bot.power+'W?\\b').test(s))f.pwr=true;
+ session.rstSent=f.rst;session.nameSent=f.name;session.qthSent=f.qth;session.pwrSent=f.pwr;
+ session.lastBotText=s;session.exchangeDepth=(session.exchangeDepth||0)+1;
+}
+function humanMemoryLine(session){
+ const h=session?.human||{};
+ const parts=[];
+ if(h.name)parts.push('name '+h.name);
+ if(h.qth)parts.push('QTH '+h.qth);
+ if(h.rst)parts.push('gave RST '+h.rst);
+ if(h.pwr)parts.push('power '+h.pwr);
+ if(h.wx)parts.push('WX '+h.wx);
+ return parts.length?parts.join('; '):'(nothing reliably copied yet)';
+}
+function botFactsLine(session){
+ const f=session?.botFacts||{};
+ const sent=[];if(f.rst)sent.push('RST');if(f.name)sent.push('NAME');if(f.qth)sent.push('QTH');if(f.pwr)sent.push('PWR');
+ return sent.length?sent.join(', '):'(none yet)';
+}
+function likelyQuestion(s,token){
+ const x=String(s||'').toUpperCase();
+ return x.includes(token+'?')||new RegExp('\\b'+token+'\\s+PSE\\b').test(x)||new RegExp('\\b'+token+'\\s+AGN\\b').test(x);
+}
 function classifyHumanTurn(clean,session){
  const s=String(clean||'').toUpperCase().replace(/\s+/g,' ').trim();
  if(isQsoCloseText(s))return 'CLOSE';
  if(fuzzyRepeatRequest(s)||/\b(QRM|QSB)\b/.test(s))return 'REPEAT';
  if(/\bQRS\b/.test(s))return 'QRS';
  if(/\bQRQ\b/.test(s))return 'QRQ';
- if(/(^|\s)([1-5][1-9][1-9]|5NN|[1-5]NN)(\s|$)/.test(s)||/\bRST\b/.test(s))return 'RST';
  if(session?.phase==='CALL_ACK')return 'CALL_ACK';
  return 'QSO';
 }
@@ -776,25 +834,36 @@ function isQsoCloseText(text){
 }
 function contextFallbackReply(bot,other,context,stage='QSO',session=null){
  const oc=other.callsign||'STN',s=String(context||'').toUpperCase();
+ const h=session?.human||{},f=session?.botFacts||{};
  if(stage==='CALL_ACK')return `${oc} DE ${bot.callsign} R ${oc} BK`;
  if(stage==='NIL_COPY')return `${oc} DE ${bot.callsign} SRI NIL COPY AGN? BK`;
  if(stage==='CLOSE')return `${oc} DE ${bot.callsign} TU FB QSO 73 SK`;
  if(stage==='REPEAT'||fuzzyRepeatRequest(s)||/\bQRM\b|\bQSB\b/.test(s)){
-  const prev=previousBotOver(session,bot);
-  return prev||`${oc} DE ${bot.callsign} AGN? BK`;
+  const prev=previousBotOver(session,bot);return prev||`${oc} DE ${bot.callsign} AGN? BK`;
  }
  if(stage==='QRS'||/\bQRS\b/.test(s))return `${oc} DE ${bot.callsign} R QRS BK`;
  if(stage==='QRQ'||/\bQRQ\b/.test(s))return `${oc} DE ${bot.callsign} R QRQ BK`;
- if(stage==='RST'){if(session)session.rstSent=true;return `${oc} R TNX UR 579 BK`;}
- if(/\bQTH\b/.test(s)&&/\?|\bQTH\?\b/.test(s))return `${oc} R QTH ${bot.qth} BK`;
- if(/\bNAME\b/.test(s)&&/\?|\bNAME\?\b/.test(s))return `${oc} R NAME ${bot.name} BK`;
- if(/\bPWR\b|\bPOWER\b/.test(s)&&/\?/.test(s))return `${oc} R PWR ${bot.power}W BK`;
- if(/\bRST\b|\bRPRT\b|\bREPORT\b/.test(s)&&/\?/.test(s))return `${oc} R UR 579 BK`;
- // Progressive fallback: one new item at a time, never a data dump.
- if(session&&!session.rstSent){session.rstSent=true;return `${oc} R TNX UR 579 BK`}
- if(session&&!session.nameSent){session.nameSent=true;return `${oc} R FB NAME ${bot.name} BK`}
- if(session&&!session.qthSent){session.qthSent=true;return `${oc} R QTH ${bot.qth} BK`}
- if(session&&!session.pwrSent){session.pwrSent=true;return `${oc} R PWR ${bot.power}W BK`}
+ // Direct questions get exact local answers if Gemini is unavailable.
+ if(likelyQuestion(s,'QTH'))return `${oc} R QTH ${bot.qth} BK`;
+ if(likelyQuestion(s,'NAME'))return `${oc} R NAME ${bot.name} BK`;
+ if((/\b(?:PWR|POWER)\?/.test(s))||/\b(?:PWR|POWER)\s+PSE\b/.test(s))return `${oc} R PWR ${bot.power}W BK`;
+ if((/\b(?:RST|RPRT|REPORT)\?/.test(s))||/\b(?:RST|RPRT|REPORT)\s+PSE\b/.test(s))return `${oc} R UR 579 BK`;
+ // Acknowledge exactly what the other operator just supplied before volunteering our data.
+ if(h.name&&new RegExp('\\bNAME(?:\\s+IS)?\\s+'+h.name+'\\b').test(s)){
+  if(!f.rst)return `R ${h.name} TNX UR 579 BK`;
+  return `R ${h.name} FB BK`;
+ }
+ if(h.qth&&s.includes('QTH')&&s.includes(h.qth))return `R FB ${h.qth} TNX BK`;
+ if(h.rst&&new RegExp('(?:^|\\s)'+h.rst.replace('NN','[0-9N]{2}')+'(?:\\s|$)').test(s)){
+  if(!f.rst)return `R TNX ${h.rst} UR 579 BK`;
+  return `R TNX ${h.rst} FB BK`;
+ }
+ if(h.pwr&&/\b(?:PWR|POWER)\b/.test(s))return `R FB ${h.pwr} BK`;
+ // Progressive safety fallback, one fact at a time, without mutating session state.
+ if(!f.rst)return `${oc} R FB UR 579 BK`;
+ if(!f.name)return `${oc} R FB NAME ${bot.name} BK`;
+ if(!f.qth)return `${oc} R FB QTH ${bot.qth} BK`;
+ if(!f.pwr)return `${oc} R FB PWR ${bot.power}W BK`;
  return `${oc} R FB TNX BK`;
 }
 function botSessionFor(user,bot){return qsoSessions.get(sessionKey(user.stationId,bot.stationId))}
@@ -829,23 +898,23 @@ async function scheduleBotReply(user,bot,stage,context,delay=260,{matchHumanSpee
   if(bot.busy){bot.replyPending=false;return scheduleBotReply(user,bot,stage,context,180,{matchHumanSpeed,session,sessionKeyValue})}
   let text='';
   try{
-   const critical=['CALL_ACK','CLOSE','REPEAT','QRS','QRQ','RST','NIL_COPY'].includes(stage);
+   const critical=['CALL_ACK','CLOSE','REPEAT','QRS','QRQ','NIL_COPY'].includes(stage);
    if(critical){
     text=contextFallbackReply(bot,user,context,stage,session);
-   }else if(aiBusy||aiQueue.length){
-    // Human turn-taking wins over AI richness. Never make an operator wait in the global queue.
-    text=contextFallbackReply(bot,user,context,stage,session);
    }else{
-    // Overall response deadline includes provider latency. The QSO always has a deterministic fallback.
+    // Normal exchange belongs to Gemini. requestAI already prioritizes human turns.
+    // A local answer remains a hard deadline fallback, so AI can add humanity but can never stall the QSO.
     const fallback=contextFallbackReply(bot,user,context,stage,session);
     text=await Promise.race([
      aiReply(bot,user,context,stage,'human',session),
-     new Promise(resolve=>setTimeout(()=>resolve(fallback),2800))
+     new Promise(resolve=>setTimeout(()=>resolve(fallback),3400))
     ]);
     if(!text)text=fallback;
    }
+   updateBotFactsFromText(session,bot,text);
+   if(session){session.aiTurns=(session.aiTurns||0)+(critical?0:1)}
    sessionPush(session,bot.callsign,text);if(session)session.turnsFromBot=(session.turnsFromBot||0)+1;
-   traceQso('TX',user,bot,session,{stage,text});
+   traceQso('TX',user,bot,session,{stage,text,human:session?.human||{},botFacts:session?.botFacts||{}});
    const sent=transmitVirtual(bot,text,{after:()=>{
     bot.replyPending=false;
     if(stage==='CLOSE'){
@@ -918,6 +987,7 @@ async function engageHumanWithBot(user,addressed,clean,{fromQueue=false}={}){
  }
  const now=Date.now();sess.lastHeardAt=now;sess.lastProcessedAt=now;sess.handledRxSeq=sess.rxSeq;sess.nudgeCount=0;sess.last=now;clearSessionTurnTimer(sess);addressed.waitingUntil=now+300000;
  const normalized=String(clean||'').replace(/\s+/g,' ').trim().toUpperCase();
+ extractHumanFacts(normalized,sess);sess.lastIntent=classifyHumanTurn(normalized,sess);
  if(!fromQueue)sessionPush(sess,humanLabel(user),normalized);
  sess.turnsFromHuman=(sess.turnsFromHuman||0)+1;
  setClusterSpot(`bot:${addressed.stationId}`,{call:addressed.callsign,with:humanLabel(user),band:addressed.band,hz:addressed.hz,wpm:addressed.wpm,status:'QSO',detail:'IN QSO',internalIds:[addressed.stationId,user.stationId]},10*60*1000);
@@ -925,7 +995,7 @@ async function engageHumanWithBot(user,addressed,clean,{fromQueue=false}={}){
  if(/\bQRQ\b/.test(normalized)){const current=sess.requestedWpm||13;sess.requestedWpm=clamp(current+2,13,30)}
  const stage=isNew&&!isQsoCloseText(normalized)?'CALL_ACK':classifyHumanTurn(normalized,sess);
  traceQso('RX',user,addressed,sess,{stage,text:normalized});
- return scheduleBotReply(user,addressed,stage,normalized,stage==='CLOSE'?180:(stage==='CALL_ACK'?220:240),{matchHumanSpeed:false,session:sess,sessionKeyValue:key});
+ return scheduleBotReply(user,addressed,stage,normalized,stage==='CLOSE'?180:(stage==='CALL_ACK'?220:(260+Math.floor(Math.random()*240))),{matchHumanSpeed:false,session:sess,sessionKeyValue:key});
 }
 
 function humanPairKey(a,b){return [a.stationId,b.stationId].sort().join('|')}
@@ -991,7 +1061,7 @@ async function processHumanText(user,text){
  if(!prev||score>prev.score)p.candidates.set(user.stationId,{user,text:clean,score,at:Date.now()});
  startPileupResolution(addressed);
 }
-// v0.49 adaptive event decoder. Because the browser sends exact key edges,
+// v0.50 adaptive event decoder. Because the browser sends exact key edges,
 // we decode relative ON/OFF timings directly instead of treating selected WPM as truth.
 function median(arr){
  const a=[...arr].filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return NaN;
@@ -1178,7 +1248,7 @@ const server=http.createServer(async(req,res)=>{
  if(urlObj.pathname==='/stats'){sendJson(res,200,{ok:true,...statsCache});return;}
  if(urlObj.pathname==='/'||urlObj.pathname==='/health'){
   sendJson(res,200,{
-   ok:true,service:'CW Network',version:'0.49',
+   ok:true,service:'CW Network',version:'0.50',
    clients:clients.size,activeBots:[...bots.values()].filter(b=>b.active).length,
    ai:aiState,aiProvider:'google-gemini',aiBusy,aiQueue:aiQueue.length,aiReadyAt,
    aiError:aiLastError||null,model:aiActiveModel,configuredModel:AI_MODEL,keyConfigured:!!GEMINI_API_KEY,
@@ -1281,4 +1351,4 @@ setInterval(()=>{const now=Date.now();for(const [k,v] of qsoSessions)if(now-v.la
 process.on('unhandledRejection',err=>console.error('unhandled rejection:',err?.message||err));
 process.on('uncaughtException',err=>console.error('uncaught exception:',err?.message||err));
 
-server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.49 listening on ${PORT}`));
+server.listen(PORT,'0.0.0.0',()=>console.log(`CW Network v0.50 listening on ${PORT}`));
